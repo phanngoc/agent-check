@@ -21,7 +21,7 @@ func main() {
 	}
 
 	// Get configuration from environment
-	port := getEnv("PORT", "8080")
+	port := getEnv("PORT", "8085")
 	host := getEnv("HOST", "0.0.0.0")
 	databaseURL := getEnv("DATABASE_URL", "postgres://tracker:tracker@localhost:5432/tracker?sslmode=disable")
 	corsOrigins := getEnv("CORS_ORIGINS", "http://localhost:3000")

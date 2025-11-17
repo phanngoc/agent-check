@@ -21,7 +21,7 @@ export default function HomePage() {
     try {
       setLoading(true);
       const result = await fetchSessions(limit, page * limit);
-      setSessions(result.data);
+      setSessions(result.data || []);
       setTotal(result.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load sessions');
@@ -84,7 +84,14 @@ export default function HomePage() {
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
-            {sessions.map((session) => (
+            {sessions.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="px-6 py-8 text-center text-gray-500">
+                  No sessions found. Start tracking to see sessions here.
+                </td>
+              </tr>
+            ) : (
+              sessions.map((session) => (
               <tr key={session.session_id} className="hover:bg-gray-50">
                 <td className="px-6 py-4 whitespace-nowrap text-sm font-mono">
                   {session.session_id.substring(0, 8)}...
@@ -122,7 +129,8 @@ export default function HomePage() {
                   </Link>
                 </td>
               </tr>
-            ))}
+              ))
+            )}
           </tbody>
         </table>
       </div>

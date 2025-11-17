@@ -1,0 +1,31 @@
+{
+  "name": "@usertracker/tracker",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "User behavior tracking script",
+  "main": "dist/tracker.js",
+  "scripts": {
+    "build": "rollup -c",
+    "dev": "rollup -c -w",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "tracking",
+    "analytics",
+    "session-replay"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^25.0.7",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-terser": "^0.4.4",
+    "@rollup/plugin-typescript": "^11.1.6",
+    "rollup": "^4.9.4",
+    "tslib": "^2.6.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "html2canvas": "^1.4.1"
+  }
+}

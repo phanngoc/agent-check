@@ -101,7 +101,7 @@ Cấu hình tracker:
 
 ```javascript
 window.UserTracker.init({
-    apiUrl: 'http://localhost:8085/api/v1',
+    apiUrl: 'http://localhost:8080/api/v1',
     userId: null,
     captureScreenshots: true,
     screenshotQuality: 0.8,
@@ -113,7 +113,7 @@ window.UserTracker.init({
 });
 ```
 
-**Lưu ý**: Đảm bảo backend API đang chạy trên port 8085 trước khi test tracking.
+**Lưu ý**: Đảm bảo backend API đang chạy trên port 8080 trước khi test tracking.
 
 ## Routes
 
@@ -149,7 +149,7 @@ Seeder đã tạo 15 bài viết mẫu về các chủ đề liên quan đến U
 
 ### Backend API không kết nối
 
-- Đảm bảo backend Go đang chạy trên port 8085
+- Đảm bảo backend Go đang chạy trên port 8080
 - Kiểm tra CORS settings trong backend
 - Xem console browser để debug
 

@@ -21,48 +21,131 @@ export default function SessionReplayPage() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [currentScreenshot, setCurrentScreenshot] = useState<Screenshot | null>(null);
-
-  // Iframe replay state
-  const [replayMode, setReplayMode] = useState<'iframe' | 'screenshot'>('iframe');
-  const [iframeLoaded, setIframeLoaded] = useState(false);
+  
+  // Event overlay state for screenshot replay
   const [cursorPosition, setCursorPosition] = useState<{ x: number; y: number } | null>(null);
-  const [iframeError, setIframeError] = useState<string | null>(null);
+  const [clickIndicator, setClickIndicator] = useState<{ x: number; y: number; timestamp: number } | null>(null);
+  const [screenshotOpacity, setScreenshotOpacity] = useState(1);
 
   const playbackTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const screenshotTransitionRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     loadSessionData();
   }, [sessionId]);
 
+  // Initialize screenshot when screenshots are loaded
+  // Always set the first screenshot when screenshots are available, regardless of events or currentIndex
   useEffect(() => {
-    // Update screenshot based on current event
-    if (events.length > 0 && screenshots.length > 0 && currentIndex < events.length) {
-      const currentEvent = events[currentIndex];
-      const screenshot = screenshots.find(
-        (s) => new Date(s.timestamp) <= new Date(currentEvent.timestamp)
-      );
-      if (screenshot) {
-        setCurrentScreenshot(screenshot);
+    if (screenshots.length > 0) {
+      // Find first screenshot with valid data_url
+      const validScreenshot = screenshots.find(s => s.data_url);
+      if (validScreenshot) {
+        // Always set screenshot if we don't have one, or if events are not loaded yet
+        // This ensures screenshot is displayed immediately, even before events are loaded
+        if (!currentScreenshot || events.length === 0) {
+          setCurrentScreenshot(validScreenshot);
+          setScreenshotOpacity(1);
+        }
+      } else {
+        // Log warning if no screenshots have data_url
+        console.warn('Screenshots loaded but none have data_url:', screenshots.map(s => ({
+          id: s.screenshot_id,
+          hasDataUrl: !!s.data_url,
+        })));
       }
     }
-  }, [currentIndex, events, screenshots]);
+  }, [screenshots, events.length, currentScreenshot]);
 
   useEffect(() => {
-    // Apply event simulation when currentIndex changes
+    // Update screenshot based on current event
+    // Find the screenshot with the largest timestamp that is still <= event timestamp
+    if (screenshots.length > 0) {
+      // If events are not loaded yet, keep the current screenshot (set by initialization)
+      if (events.length === 0 || currentIndex >= events.length) {
+        // Ensure we have a screenshot even if events are not loaded
+        if (!currentScreenshot) {
+          const validScreenshot = screenshots.find(s => s.data_url) || screenshots[0];
+          if (validScreenshot) {
+            setCurrentScreenshot(validScreenshot);
+            setScreenshotOpacity(1);
+          }
+        }
+        return;
+      }
+
+      // Events are loaded, find screenshot matching current event
+      const currentEvent = events[currentIndex];
+      if (!currentEvent) return;
+
+      const eventTimestamp = new Date(currentEvent.timestamp).getTime();
+      
+      // Filter screenshots that are <= event timestamp and have valid data_url
+      const validScreenshots = screenshots.filter(
+        (s) => s.data_url && new Date(s.timestamp).getTime() <= eventTimestamp
+      );
+      
+      let targetScreenshot: Screenshot | null = null;
+      
+      if (validScreenshots.length > 0) {
+        // Find screenshot with the largest timestamp (closest to event timestamp)
+        targetScreenshot = validScreenshots.reduce((prev, current) => {
+          const prevTime = new Date(prev.timestamp).getTime();
+          const currentTime = new Date(current.timestamp).getTime();
+          return currentTime > prevTime ? current : prev;
+        });
+      } else {
+        // If no screenshot before event timestamp, use the first valid screenshot
+        targetScreenshot = screenshots.find(s => s.data_url) || screenshots[0];
+      }
+      
+      // Update screenshot if it's different
+      if (targetScreenshot && currentScreenshot?.screenshot_id !== targetScreenshot.screenshot_id) {
+        // Clear any pending transition
+        if (screenshotTransitionRef.current) {
+          clearTimeout(screenshotTransitionRef.current);
+        }
+        setScreenshotOpacity(0);
+        screenshotTransitionRef.current = setTimeout(() => {
+          setCurrentScreenshot(targetScreenshot);
+          setScreenshotOpacity(1);
+          screenshotTransitionRef.current = null;
+        }, 150);
+      }
+    }
+    
+    // Cleanup on unmount
+    return () => {
+      if (screenshotTransitionRef.current) {
+        clearTimeout(screenshotTransitionRef.current);
+      }
+    };
+  }, [currentIndex, events, screenshots, currentScreenshot]);
+
+  // Update event overlays when currentIndex changes
+  useEffect(() => {
     if (events.length > 0 && currentIndex < events.length) {
       const currentEvent = events[currentIndex];
-      applyEvent(currentEvent);
+      
+      // Update cursor position for mousemove and click events
+      if (currentEvent.viewport_x !== undefined && currentEvent.viewport_y !== undefined) {
+        setCursorPosition({ x: currentEvent.viewport_x, y: currentEvent.viewport_y });
+        
+        // Show click indicator for click events
+        if (currentEvent.event_type === 'click') {
+          setClickIndicator({ 
+            x: currentEvent.viewport_x, 
+            y: currentEvent.viewport_y,
+            timestamp: Date.now()
+          });
+          // Clear click indicator after animation
+          setTimeout(() => setClickIndicator(null), 600);
+        }
+      } else {
+        setCursorPosition(null);
+      }
     }
-  }, [currentIndex, events, iframeLoaded, replayMode]);
-
-  useEffect(() => {
-    // Reset iframe when switching to iframe mode
-    if (replayMode === 'iframe') {
-      setIframeLoaded(false);
-      setIframeError(null);
-    }
-  }, [replayMode]);
+  }, [currentIndex, events]);
 
   useEffect(() => {
     if (isPlaying && currentIndex < events.length - 1) {
@@ -95,8 +178,21 @@ export default function SessionReplayPage() {
       ]);
       setSession(sessionData);
       setEvents(eventsData.data);
-      setScreenshots(screenshotsData.data);
+      
+      // Log screenshots data for debugging
+      console.log('Screenshots loaded:', {
+        count: screenshotsData.data?.length || 0,
+        withDataUrl: screenshotsData.data?.filter(s => s.data_url).length || 0,
+        firstScreenshot: screenshotsData.data?.[0] ? {
+          id: screenshotsData.data[0].screenshot_id,
+          hasDataUrl: !!screenshotsData.data[0].data_url,
+          dataUrlLength: screenshotsData.data[0].data_url?.length || 0,
+        } : null,
+      });
+      
+      setScreenshots(screenshotsData.data || []);
     } catch (err) {
+      console.error('Failed to load session data:', err);
       setError(err instanceof Error ? err.message : 'Failed to load session data');
     } finally {
       setLoading(false);
@@ -121,115 +217,6 @@ export default function SessionReplayPage() {
     setIsPlaying(false);
   }
 
-  function applyEvent(event: SessionEvent) {
-    if (!iframeRef.current || !iframeLoaded || replayMode !== 'iframe') {
-      return;
-    }
-
-    try {
-      const iframeWindow = iframeRef.current.contentWindow;
-      const iframeDocument = iframeRef.current.contentDocument;
-
-      if (!iframeWindow || !iframeDocument) {
-        throw new Error('Cannot access iframe content');
-      }
-
-      switch (event.event_type) {
-        case 'scroll':
-          if (event.scroll_x !== undefined && event.scroll_y !== undefined) {
-            iframeWindow.scrollTo({
-              left: event.scroll_x,
-              top: event.scroll_y,
-              behavior: 'smooth',
-            });
-          }
-          break;
-
-        case 'click':
-          if (event.viewport_x !== undefined && event.viewport_y !== undefined) {
-            // Show visual feedback for click
-            setCursorPosition({ x: event.viewport_x, y: event.viewport_y });
-
-            // Try to find and click the actual element
-            if (event.target_selector) {
-              try {
-                const element = iframeDocument.querySelector(event.target_selector);
-                if (element) {
-                  const clickEvent = new MouseEvent('click', {
-                    bubbles: true,
-                    cancelable: true,
-                    view: iframeWindow,
-                    clientX: event.viewport_x,
-                    clientY: event.viewport_y,
-                  });
-                  element.dispatchEvent(clickEvent);
-                }
-              } catch (e) {
-                console.warn('Could not dispatch click event:', e);
-              }
-            }
-
-            // Clear cursor after brief delay
-            setTimeout(() => setCursorPosition(null), 500);
-          }
-          break;
-
-        case 'input':
-          if (event.target_selector && event.input_value !== undefined && !event.input_masked) {
-            try {
-              const element = iframeDocument.querySelector(event.target_selector) as HTMLInputElement | HTMLTextAreaElement;
-              if (element && ('value' in element)) {
-                element.value = event.input_value;
-
-                // Dispatch input and change events
-                const inputEvent = new Event('input', { bubbles: true });
-                const changeEvent = new Event('change', { bubbles: true });
-                element.dispatchEvent(inputEvent);
-                element.dispatchEvent(changeEvent);
-              }
-            } catch (e) {
-              console.warn('Could not set input value:', e);
-            }
-          }
-          break;
-
-        case 'mousemove':
-          if (event.viewport_x !== undefined && event.viewport_y !== undefined) {
-            setCursorPosition({ x: event.viewport_x, y: event.viewport_y });
-          }
-          break;
-
-        case 'navigation':
-          // Handle page navigation if URL changes
-          if (event.page_url && event.page_url !== iframeWindow.location.href) {
-            setIframeLoaded(false);
-            iframeRef.current.src = event.page_url;
-          }
-          break;
-
-        default:
-          // Other event types don't need simulation
-          break;
-      }
-    } catch (err) {
-      console.error('Error applying event:', err);
-      // If we get cross-origin errors, fall back to screenshot mode
-      if (err instanceof DOMException && err.name === 'SecurityError') {
-        setReplayMode('screenshot');
-        setIframeError('Cross-origin restriction: showing screenshots instead');
-      }
-    }
-  }
-
-  function handleIframeLoad() {
-    setIframeLoaded(true);
-    setIframeError(null);
-  }
-
-  function handleIframeError() {
-    setReplayMode('screenshot');
-    setIframeError('Failed to load page in iframe: showing screenshots instead');
-  }
 
   if (loading) {
     return <div className="text-center py-8">Loading session data...</div>;
@@ -285,59 +272,65 @@ export default function SessionReplayPage() {
         {/* Main replay area */}
         <div className="lg:col-span-2">
           <div className="bg-white rounded-lg shadow overflow-hidden">
-            {/* Iframe replay or screenshot fallback */}
+            {/* Screenshot replay with event overlays */}
             <div className="bg-gray-100 aspect-video flex items-center justify-center overflow-auto relative">
-              {iframeError && (
-                <div className="absolute top-2 left-2 right-2 bg-yellow-100 border border-yellow-400 text-yellow-800 px-3 py-2 rounded text-sm z-10">
-                  ⚠️ {iframeError}
-                </div>
-              )}
-
-              {replayMode === 'iframe' && currentEvent?.page_url ? (
+              {currentScreenshot && currentScreenshot.data_url ? (
                 <>
-                  {!iframeLoaded && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-gray-100 z-20">
-                      <div className="text-gray-600">Loading page...</div>
-                    </div>
-                  )}
-                  <iframe
-                    ref={iframeRef}
-                    src={currentEvent.page_url}
-                    onLoad={handleIframeLoad}
-                    onError={handleIframeError}
-                    className="w-full h-full border-0"
-                    sandbox="allow-same-origin allow-scripts"
-                    title="Session replay"
+                  <img
+                    src={currentScreenshot.data_url}
+                    alt="Page screenshot"
+                    className="max-w-full h-auto transition-opacity duration-300"
+                    style={{ opacity: screenshotOpacity }}
                   />
-
-                  {/* Cursor indicator for click/mousemove events */}
+                  
+                  {/* Cursor position overlay */}
                   {cursorPosition && (
                     <div
-                      className="absolute w-6 h-6 rounded-full bg-red-500 opacity-50 pointer-events-none transition-all duration-200"
+                      className="absolute pointer-events-none transition-all duration-150 ease-out z-20"
                       style={{
                         left: `${cursorPosition.x}px`,
                         top: `${cursorPosition.y}px`,
                         transform: 'translate(-50%, -50%)',
-                        zIndex: 30,
                       }}
                     >
-                      <div className="absolute inset-0 rounded-full bg-red-500 animate-ping" />
+                      <div className="w-4 h-4 border-2 border-blue-500 rounded-full bg-blue-500 bg-opacity-30" />
+                      <div className="absolute top-0 left-0 w-4 h-4 border-2 border-blue-500 rounded-full animate-ping opacity-75" />
+                    </div>
+                  )}
+
+                  {/* Click indicator (ripple effect) */}
+                  {clickIndicator && (
+                    <div
+                      className="absolute pointer-events-none z-30"
+                      style={{
+                        left: `${clickIndicator.x}px`,
+                        top: `${clickIndicator.y}px`,
+                        transform: 'translate(-50%, -50%)',
+                      }}
+                    >
+                      <div className="w-8 h-8 border-2 border-red-500 rounded-full animate-ping" />
+                      <div className="absolute top-0 left-0 w-8 h-8 border-2 border-red-500 rounded-full animate-ping" style={{ animationDelay: '0.2s' }} />
+                    </div>
+                  )}
+
+                  {/* Scroll position indicator */}
+                  {currentEvent && currentEvent.scroll_x !== undefined && currentEvent.scroll_y !== undefined && (
+                    <div className="absolute top-2 right-2 bg-black bg-opacity-50 text-white text-xs px-2 py-1 rounded z-10">
+                      Scroll: {currentEvent.scroll_x}, {currentEvent.scroll_y}
                     </div>
                   )}
                 </>
+              ) : screenshots.length > 0 ? (
+                <div className="text-gray-400">
+                  {screenshots.some(s => !s.data_url) 
+                    ? 'Screenshots loaded but missing data_url. Check API response.'
+                    : 'Loading screenshot...'}
+                </div>
               ) : (
-                // Fallback to screenshot mode
-                <>
-                  {currentScreenshot && currentScreenshot.data_url ? (
-                    <img
-                      src={currentScreenshot.data_url}
-                      alt="Page screenshot"
-                      className="max-w-full h-auto"
-                    />
-                  ) : (
-                    <div className="text-gray-400">No screenshot available</div>
-                  )}
-                </>
+                <div className="text-gray-400">
+                  No screenshot available
+                  {error && <div className="text-red-500 text-xs mt-2">{error}</div>}
+                </div>
               )}
             </div>
 
@@ -394,29 +387,6 @@ export default function SessionReplayPage() {
                       {speed}x
                     </button>
                   ))}
-                </div>
-                <div className="flex gap-2">
-                  <span className="text-sm text-gray-600">Mode:</span>
-                  <button
-                    onClick={() => setReplayMode('iframe')}
-                    className={`px-3 py-1 rounded text-sm ${
-                      replayMode === 'iframe'
-                        ? 'bg-green-600 text-white'
-                        : 'bg-gray-200 hover:bg-gray-300'
-                    }`}
-                  >
-                    🎬 Live
-                  </button>
-                  <button
-                    onClick={() => setReplayMode('screenshot')}
-                    className={`px-3 py-1 rounded text-sm ${
-                      replayMode === 'screenshot'
-                        ? 'bg-green-600 text-white'
-                        : 'bg-gray-200 hover:bg-gray-300'
-                    }`}
-                  >
-                    📸 Screenshot
-                  </button>
                 </div>
               </div>
             </div>

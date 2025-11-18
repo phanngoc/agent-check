@@ -21,7 +21,7 @@ export interface Session {
   screenshot_count?: number;
 }
 
-export interface Event {
+export interface SessionEvent {
   event_id: number;
   session_id: string;
   timestamp: string;
@@ -70,7 +70,7 @@ export async function fetchSession(sessionId: string): Promise<Session> {
   return response.json();
 }
 
-export async function fetchSessionEvents(sessionId: string): Promise<{ data: Event[]; total: number }> {
+export async function fetchSessionEvents(sessionId: string): Promise<{ data: SessionEvent[]; total: number }> {
   const response = await fetch(`${API_URL}/sessions/${sessionId}/events?limit=10000`);
   if (!response.ok) throw new Error('Failed to fetch events');
   return response.json();

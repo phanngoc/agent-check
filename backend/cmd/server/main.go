@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -11,6 +12,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/ngocp/user-tracker/internal/handlers"
 	"github.com/ngocp/user-tracker/internal/middleware"
+	"github.com/ngocp/user-tracker/internal/migration"
 	"github.com/ngocp/user-tracker/internal/repository"
 )
 
@@ -24,7 +26,20 @@ func main() {
 	port := getEnv("PORT", "8085")
 	host := getEnv("HOST", "0.0.0.0")
 	databaseURL := getEnv("DATABASE_URL", "postgres://tracker:tracker@localhost:5432/tracker?sslmode=disable")
-	corsOrigins := getEnv("CORS_ORIGINS", "http://localhost:3000")
+	// Default CORS_ORIGINS includes common development origins
+	// The CORS middleware will automatically add "null" if not present, but including it here for clarity
+	corsOrigins := getEnv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:8000,http://localhost:8000,null")
+	autoMigrate := getEnv("AUTO_MIGRATE", "false") == "true"
+
+	// Run migrations if AUTO_MIGRATE is enabled
+	if autoMigrate {
+		log.Println("AUTO_MIGRATE is enabled, running migrations...")
+		projectRoot := getProjectRoot()
+		migrationsPath := filepath.Join(projectRoot, "database", "migrations")
+		if err := migration.RunMigrations(databaseURL, migrationsPath); err != nil {
+			log.Printf("Warning: Migration failed (server will continue): %v", err)
+		}
+	}
 
 	// Initialize database
 	db, err := repository.NewDatabase(databaseURL)
@@ -104,4 +119,23 @@ func getEnv(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+func getProjectRoot() string {
+	// Try to get current working directory
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Fatal("Failed to determine project root")
+	}
+
+	// If we're in cmd/server, go up to backend, then to project root
+	if filepath.Base(wd) == "server" {
+		return filepath.Join(wd, "..", "..", "..")
+	}
+	// If we're in backend, go up one level
+	if filepath.Base(wd) == "backend" {
+		return filepath.Join(wd, "..")
+	}
+	// Otherwise assume we're at project root
+	return wd
 }

@@ -4,14 +4,14 @@ import { useEffect, useState, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { format } from 'date-fns';
-import { fetchSession, fetchSessionEvents, fetchSessionScreenshots, Session, Event, Screenshot } from '@/lib/api';
+import { fetchSession, fetchSessionEvents, fetchSessionScreenshots, Session, SessionEvent, Screenshot } from '@/lib/api';
 
 export default function SessionReplayPage() {
   const params = useParams();
   const sessionId = params.id as string;
 
   const [session, setSession] = useState<Session | null>(null);
-  const [events, setEvents] = useState<Event[]>([]);
+  const [events, setEvents] = useState<SessionEvent[]>([]);
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -22,7 +22,14 @@ export default function SessionReplayPage() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [currentScreenshot, setCurrentScreenshot] = useState<Screenshot | null>(null);
 
+  // Iframe replay state
+  const [replayMode, setReplayMode] = useState<'iframe' | 'screenshot'>('iframe');
+  const [iframeLoaded, setIframeLoaded] = useState(false);
+  const [cursorPosition, setCursorPosition] = useState<{ x: number; y: number } | null>(null);
+  const [iframeError, setIframeError] = useState<string | null>(null);
+
   const playbackTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
     loadSessionData();
@@ -40,6 +47,22 @@ export default function SessionReplayPage() {
       }
     }
   }, [currentIndex, events, screenshots]);
+
+  useEffect(() => {
+    // Apply event simulation when currentIndex changes
+    if (events.length > 0 && currentIndex < events.length) {
+      const currentEvent = events[currentIndex];
+      applyEvent(currentEvent);
+    }
+  }, [currentIndex, events, iframeLoaded, replayMode]);
+
+  useEffect(() => {
+    // Reset iframe when switching to iframe mode
+    if (replayMode === 'iframe') {
+      setIframeLoaded(false);
+      setIframeError(null);
+    }
+  }, [replayMode]);
 
   useEffect(() => {
     if (isPlaying && currentIndex < events.length - 1) {
@@ -98,6 +121,116 @@ export default function SessionReplayPage() {
     setIsPlaying(false);
   }
 
+  function applyEvent(event: SessionEvent) {
+    if (!iframeRef.current || !iframeLoaded || replayMode !== 'iframe') {
+      return;
+    }
+
+    try {
+      const iframeWindow = iframeRef.current.contentWindow;
+      const iframeDocument = iframeRef.current.contentDocument;
+
+      if (!iframeWindow || !iframeDocument) {
+        throw new Error('Cannot access iframe content');
+      }
+
+      switch (event.event_type) {
+        case 'scroll':
+          if (event.scroll_x !== undefined && event.scroll_y !== undefined) {
+            iframeWindow.scrollTo({
+              left: event.scroll_x,
+              top: event.scroll_y,
+              behavior: 'smooth',
+            });
+          }
+          break;
+
+        case 'click':
+          if (event.viewport_x !== undefined && event.viewport_y !== undefined) {
+            // Show visual feedback for click
+            setCursorPosition({ x: event.viewport_x, y: event.viewport_y });
+
+            // Try to find and click the actual element
+            if (event.target_selector) {
+              try {
+                const element = iframeDocument.querySelector(event.target_selector);
+                if (element) {
+                  const clickEvent = new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: iframeWindow,
+                    clientX: event.viewport_x,
+                    clientY: event.viewport_y,
+                  });
+                  element.dispatchEvent(clickEvent);
+                }
+              } catch (e) {
+                console.warn('Could not dispatch click event:', e);
+              }
+            }
+
+            // Clear cursor after brief delay
+            setTimeout(() => setCursorPosition(null), 500);
+          }
+          break;
+
+        case 'input':
+          if (event.target_selector && event.input_value !== undefined && !event.input_masked) {
+            try {
+              const element = iframeDocument.querySelector(event.target_selector) as HTMLInputElement | HTMLTextAreaElement;
+              if (element && ('value' in element)) {
+                element.value = event.input_value;
+
+                // Dispatch input and change events
+                const inputEvent = new Event('input', { bubbles: true });
+                const changeEvent = new Event('change', { bubbles: true });
+                element.dispatchEvent(inputEvent);
+                element.dispatchEvent(changeEvent);
+              }
+            } catch (e) {
+              console.warn('Could not set input value:', e);
+            }
+          }
+          break;
+
+        case 'mousemove':
+          if (event.viewport_x !== undefined && event.viewport_y !== undefined) {
+            setCursorPosition({ x: event.viewport_x, y: event.viewport_y });
+          }
+          break;
+
+        case 'navigation':
+          // Handle page navigation if URL changes
+          if (event.page_url && event.page_url !== iframeWindow.location.href) {
+            setIframeLoaded(false);
+            iframeRef.current.src = event.page_url;
+          }
+          break;
+
+        default:
+          // Other event types don't need simulation
+          break;
+      }
+    } catch (err) {
+      console.error('Error applying event:', err);
+      // If we get cross-origin errors, fall back to screenshot mode
+      if (err instanceof DOMException && err.name === 'SecurityError') {
+        setReplayMode('screenshot');
+        setIframeError('Cross-origin restriction: showing screenshots instead');
+      }
+    }
+  }
+
+  function handleIframeLoad() {
+    setIframeLoaded(true);
+    setIframeError(null);
+  }
+
+  function handleIframeError() {
+    setReplayMode('screenshot');
+    setIframeError('Failed to load page in iframe: showing screenshots instead');
+  }
+
   if (loading) {
     return <div className="text-center py-8">Loading session data...</div>;
   }
@@ -152,16 +285,59 @@ export default function SessionReplayPage() {
         {/* Main replay area */}
         <div className="lg:col-span-2">
           <div className="bg-white rounded-lg shadow overflow-hidden">
-            {/* Screenshot display */}
-            <div className="bg-gray-100 aspect-video flex items-center justify-center overflow-auto">
-              {currentScreenshot && currentScreenshot.data_url ? (
-                <img
-                  src={currentScreenshot.data_url}
-                  alt="Page screenshot"
-                  className="max-w-full h-auto"
-                />
+            {/* Iframe replay or screenshot fallback */}
+            <div className="bg-gray-100 aspect-video flex items-center justify-center overflow-auto relative">
+              {iframeError && (
+                <div className="absolute top-2 left-2 right-2 bg-yellow-100 border border-yellow-400 text-yellow-800 px-3 py-2 rounded text-sm z-10">
+                  ⚠️ {iframeError}
+                </div>
+              )}
+
+              {replayMode === 'iframe' && currentEvent?.page_url ? (
+                <>
+                  {!iframeLoaded && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-gray-100 z-20">
+                      <div className="text-gray-600">Loading page...</div>
+                    </div>
+                  )}
+                  <iframe
+                    ref={iframeRef}
+                    src={currentEvent.page_url}
+                    onLoad={handleIframeLoad}
+                    onError={handleIframeError}
+                    className="w-full h-full border-0"
+                    sandbox="allow-same-origin allow-scripts"
+                    title="Session replay"
+                  />
+
+                  {/* Cursor indicator for click/mousemove events */}
+                  {cursorPosition && (
+                    <div
+                      className="absolute w-6 h-6 rounded-full bg-red-500 opacity-50 pointer-events-none transition-all duration-200"
+                      style={{
+                        left: `${cursorPosition.x}px`,
+                        top: `${cursorPosition.y}px`,
+                        transform: 'translate(-50%, -50%)',
+                        zIndex: 30,
+                      }}
+                    >
+                      <div className="absolute inset-0 rounded-full bg-red-500 animate-ping" />
+                    </div>
+                  )}
+                </>
               ) : (
-                <div className="text-gray-400">No screenshot available</div>
+                // Fallback to screenshot mode
+                <>
+                  {currentScreenshot && currentScreenshot.data_url ? (
+                    <img
+                      src={currentScreenshot.data_url}
+                      alt="Page screenshot"
+                      className="max-w-full h-auto"
+                    />
+                  ) : (
+                    <div className="text-gray-400">No screenshot available</div>
+                  )}
+                </>
               )}
             </div>
 
@@ -190,7 +366,7 @@ export default function SessionReplayPage() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-4 flex-wrap">
                 <button
                   onClick={handleReset}
                   className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
@@ -218,6 +394,29 @@ export default function SessionReplayPage() {
                       {speed}x
                     </button>
                   ))}
+                </div>
+                <div className="flex gap-2">
+                  <span className="text-sm text-gray-600">Mode:</span>
+                  <button
+                    onClick={() => setReplayMode('iframe')}
+                    className={`px-3 py-1 rounded text-sm ${
+                      replayMode === 'iframe'
+                        ? 'bg-green-600 text-white'
+                        : 'bg-gray-200 hover:bg-gray-300'
+                    }`}
+                  >
+                    🎬 Live
+                  </button>
+                  <button
+                    onClick={() => setReplayMode('screenshot')}
+                    className={`px-3 py-1 rounded text-sm ${
+                      replayMode === 'screenshot'
+                        ? 'bg-green-600 text-white'
+                        : 'bg-gray-200 hover:bg-gray-300'
+                    }`}
+                  >
+                    📸 Screenshot
+                  </button>
                 </div>
               </div>
             </div>

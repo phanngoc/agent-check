@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg15
@@ -20,6 +18,27 @@ services:
       timeout: 5s
       retries: 5
 
+  # MySQL for Laravel Blog
+  mysql:
+    image: mysql:8.0
+    container_name: tracker-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: blog_demo
+      MYSQL_USER: blog_user
+      MYSQL_PASSWORD: blog_pass
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/init_blog.sql:/docker-entrypoint-initdb.d/init_blog.sql
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # Optional: PgAdmin for database management
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -36,4 +55,6 @@ services:
 
 volumes:
   timescale_data:
+    driver: local
+  mysql_data:
     driver: local

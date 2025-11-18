@@ -206,6 +206,41 @@ npm install
 curl http://localhost:8080/api/v1/sessions
 ```
 
+### Database Migrations
+
+The project uses `golang-migrate` for database schema management. Migrations are located in `database/migrations/`.
+
+**Running Migrations:**
+
+1. **Manual migration (recommended for production):**
+   ```bash
+   cd backend
+   go run cmd/migrate/main.go -command up
+   ```
+
+2. **Automatic migration on server start:**
+   Set `AUTO_MIGRATE=true` in `backend/.env`:
+   ```env
+   AUTO_MIGRATE=true
+   ```
+
+3. **Check migration version:**
+   ```bash
+   go run cmd/migrate/main.go -command version
+   ```
+
+4. **Rollback last migration:**
+   ```bash
+   go run cmd/migrate/main.go -command down
+   ```
+
+5. **Migrate to specific version:**
+   ```bash
+   go run cmd/migrate/main.go -command to -version 1
+   ```
+
+**Note:** For fresh installations, the database is automatically initialized via `database/init.sql` when using Docker Compose. Migrations are used for updating existing databases.
+
 ### CORS Issues
 
 If you get CORS errors in the browser:
@@ -229,6 +264,7 @@ PORT=8080
 HOST=0.0.0.0
 DATABASE_URL=postgres://user:pass@host:5432/dbname
 CORS_ORIGINS=https://yourdomain.com
+AUTO_MIGRATE=false  # Set to true to auto-run migrations on startup
 ```
 
 **Dashboard:**

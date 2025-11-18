@@ -95,13 +95,17 @@ Add the tracking script to your website:
 │   └── package.json
 │
 ├── backend/              # API server (Go)
-│   ├── cmd/server/
-│   │   └── main.go
+│   ├── cmd/
+│   │   ├── server/
+│   │   │   └── main.go
+│   │   └── migrate/
+│   │       └── main.go  # Migration CLI tool
 │   ├── internal/
 │   │   ├── handlers/     # HTTP handlers
 │   │   ├── models/       # Database models
 │   │   ├── repository/   # Data access layer
-│   │   └── middleware/   # CORS, auth, etc
+│   │   ├── middleware/   # CORS, auth, etc
+│   │   └── migration/    # Migration helpers
 │   ├── go.mod
 │   └── .env
 │
@@ -116,8 +120,12 @@ Add the tracking script to your website:
 │   └── package.json
 │
 ├── database/
-│   ├── migrations/
-│   └── init.sql
+│   ├── migrations/       # Database migration files
+│   │   ├── 000001_initial_schema.up.sql
+│   │   ├── 000001_initial_schema.down.sql
+│   │   ├── 000002_fix_target_element_length.up.sql
+│   │   └── 000002_fix_target_element_length.down.sql
+│   └── init.sql         # Initial schema (for Docker)
 │
 └── docker-compose.yml
 ```
@@ -143,6 +151,7 @@ Add the tracking script to your website:
 DATABASE_URL=postgres://tracker:tracker@localhost:5432/tracker
 PORT=8080
 CORS_ORIGINS=http://localhost:3000
+AUTO_MIGRATE=false  # Set to true to auto-run migrations on startup
 ```
 
 **Tracker** (init options):

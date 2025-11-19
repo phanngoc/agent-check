@@ -34,12 +34,12 @@ type Event struct {
 	TargetID       *string                `json:"target_id,omitempty" db:"target_id"`
 	TargetClass    *string                `json:"target_class,omitempty" db:"target_class"`
 	PageURL        string                 `json:"page_url" db:"page_url"`
-	ViewportX      *int                   `json:"viewport_x,omitempty" db:"viewport_x"`
-	ViewportY      *int                   `json:"viewport_y,omitempty" db:"viewport_y"`
-	ScreenX        *int                   `json:"screen_x,omitempty" db:"screen_x"`
-	ScreenY        *int                   `json:"screen_y,omitempty" db:"screen_y"`
-	ScrollX        *int                   `json:"scroll_x,omitempty" db:"scroll_x"`
-	ScrollY        *int                   `json:"scroll_y,omitempty" db:"scroll_y"`
+	ViewportX      *float64               `json:"viewport_x,omitempty" db:"viewport_x"`
+	ViewportY      *float64               `json:"viewport_y,omitempty" db:"viewport_y"`
+	ScreenX        *float64               `json:"screen_x,omitempty" db:"screen_x"`
+	ScreenY        *float64               `json:"screen_y,omitempty" db:"screen_y"`
+	ScrollX        *float64               `json:"scroll_x,omitempty" db:"scroll_x"`
+	ScrollY        *float64               `json:"scroll_y,omitempty" db:"scroll_y"`
 	InputValue     *string                `json:"input_value,omitempty" db:"input_value"`
 	InputMasked    bool                   `json:"input_masked" db:"input_masked"`
 	KeyPressed     *string                `json:"key_pressed,omitempty" db:"key_pressed"`
@@ -62,12 +62,12 @@ type EventData struct {
 	TargetID       *string                `json:"target_id,omitempty"`
 	TargetClass    *string                `json:"target_class,omitempty"`
 	PageURL        string                 `json:"page_url" validate:"required"`
-	ViewportX      *int                   `json:"viewport_x,omitempty"`
-	ViewportY      *int                   `json:"viewport_y,omitempty"`
-	ScreenX        *int                   `json:"screen_x,omitempty"`
-	ScreenY        *int                   `json:"screen_y,omitempty"`
-	ScrollX        *int                   `json:"scroll_x,omitempty"`
-	ScrollY        *int                   `json:"scroll_y,omitempty"`
+	ViewportX      *float64               `json:"viewport_x,omitempty"`
+	ViewportY      *float64               `json:"viewport_y,omitempty"`
+	ScreenX        *float64               `json:"screen_x,omitempty"`
+	ScreenY        *float64               `json:"screen_y,omitempty"`
+	ScrollX        *float64               `json:"scroll_x,omitempty"`
+	ScrollY        *float64               `json:"scroll_y,omitempty"`
 	InputValue     *string                `json:"input_value,omitempty"`
 	InputMasked    bool                   `json:"input_masked"`
 	KeyPressed     *string                `json:"key_pressed,omitempty"`

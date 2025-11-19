@@ -39,6 +39,21 @@ services:
       timeout: 5s
       retries: 5
 
+  # Redis for queue processing
+  redis:
+    image: redis:7-alpine
+    container_name: tracker-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # Optional: PgAdmin for database management
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -53,8 +68,23 @@ services:
     profiles:
       - tools
 
+  # Optional: Redis Commander for Redis management
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: tracker-redis-commander
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    profiles:
+      - tools
+
 volumes:
   timescale_data:
     driver: local
   mysql_data:
+    driver: local
+  redis_data:
     driver: local

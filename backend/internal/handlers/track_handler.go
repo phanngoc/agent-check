@@ -9,58 +9,127 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/ngocp/user-tracker/internal/models"
+	"github.com/ngocp/user-tracker/internal/queue"
 	"github.com/ngocp/user-tracker/internal/repository"
 )
 
 type TrackHandler struct {
-	eventRepo      *repository.EventRepository
+	eventQueue     *queue.EventQueue
 	screenshotRepo *repository.ScreenshotRepository
 }
 
-func NewTrackHandler(eventRepo *repository.EventRepository, screenshotRepo *repository.ScreenshotRepository) *TrackHandler {
+func NewTrackHandler(eventQueue *queue.EventQueue, screenshotRepo *repository.ScreenshotRepository) *TrackHandler {
 	return &TrackHandler{
-		eventRepo:      eventRepo,
+		eventQueue:     eventQueue,
 		screenshotRepo: screenshotRepo,
 	}
 }
 
 func (h *TrackHandler) TrackEvents(c *fiber.Ctx) error {
+	// Log raw request body for debugging (read before parsing)
+	rawBody := string(c.Body())
+	if len(rawBody) > 0 {
+		bodyPreview := rawBody
+		if len(bodyPreview) > 500 {
+			bodyPreview = bodyPreview[:500] + "..."
+		}
+		log.Printf("[TrackEvents] Raw request body: %s", bodyPreview)
+	} else {
+		log.Printf("[TrackEvents] Warning: Request body is empty")
+	}
+
 	var req models.TrackEventRequest
 	if err := c.BodyParser(&req); err != nil {
+		log.Printf("[TrackEvents] BodyParser error: %v", err)
+		log.Printf("[TrackEvents] Full raw body: %s", rawBody)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request body",
+			"error":   "Invalid request body",
+			"details": err.Error(),
 		})
 	}
 
+	log.Printf("[TrackEvents] Parsed request - SessionID: %s, Events count: %d", req.SessionID, len(req.Events))
+	if len(req.Events) > 0 {
+		firstEvent := req.Events[0]
+		log.Printf("[TrackEvents] First event - Type: %s, PageURL: %s, Timestamp: %v (Zero: %v)", 
+			firstEvent.EventType, firstEvent.PageURL, firstEvent.Timestamp, firstEvent.Timestamp.IsZero())
+		
+		// Validate timestamp - check if it's zero (not parsed correctly)
+		if firstEvent.Timestamp.IsZero() {
+			log.Printf("[TrackEvents] Warning: First event has zero timestamp - may indicate parsing issue")
+		}
+		
+		// Validate required fields
+		if firstEvent.PageURL == "" {
+			log.Printf("[TrackEvents] Warning: First event has empty page_url")
+		}
+		if firstEvent.EventType == "" {
+			log.Printf("[TrackEvents] Warning: First event has empty event_type")
+		}
+	}
+
 	if req.SessionID == "" {
+		log.Printf("[TrackEvents] Validation error: session_id is empty")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "session_id is required",
+			"error":   "session_id is required",
+			"details": "The session_id field cannot be empty",
 		})
 	}
 
 	if len(req.Events) == 0 {
+		log.Printf("[TrackEvents] Validation error: events array is empty")
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "events array cannot be empty",
+			"error":   "events array cannot be empty",
+			"details": "At least one event must be provided",
 		})
+	}
+
+	// Validate each event
+	for i, event := range req.Events {
+		if event.Timestamp.IsZero() {
+			log.Printf("[TrackEvents] Validation error: event[%d] has invalid timestamp (zero value)", i)
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "Invalid event timestamp",
+				"details": fmt.Sprintf("Event at index %d has invalid or missing timestamp", i),
+			})
+		}
+		if event.EventType == "" {
+			log.Printf("[TrackEvents] Validation error: event[%d] has empty event_type", i)
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "Invalid event type",
+				"details": fmt.Sprintf("Event at index %d has empty event_type", i),
+			})
+		}
+		if event.PageURL == "" {
+			log.Printf("[TrackEvents] Validation error: event[%d] has empty page_url", i)
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error":   "Invalid page URL",
+				"details": fmt.Sprintf("Event at index %d has empty page_url", i),
+			})
+		}
 	}
 
 	sessionID, err := uuid.Parse(req.SessionID)
 	if err != nil {
+		log.Printf("[TrackEvents] UUID parse error: %v, SessionID: %s", err, req.SessionID)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid session ID format",
+			"error":   "Invalid session ID format",
+			"details": fmt.Sprintf("Expected UUID format, got: %s", req.SessionID),
 		})
 	}
 
-	err = h.eventRepo.CreateBatch(c.Context(), sessionID, req.Events)
+	// Enqueue events to Redis for async processing
+	err = h.eventQueue.Enqueue(c.Context(), sessionID, req.Events)
 	if err != nil {
-		log.Printf("Failed to create events: %v", err)
+		log.Printf("[TrackEvents] Failed to queue events: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to save events",
+			"error": "Failed to queue events",
 		})
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message": "Events tracked successfully",
+	log.Printf("[TrackEvents] Successfully queued %d events for session %s", len(req.Events), sessionID)
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"message": "Events queued successfully",
 		"count":   len(req.Events),
 	})
 }

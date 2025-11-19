@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -15,6 +16,24 @@ type EventRepository struct {
 
 func NewEventRepository(db *Database) *EventRepository {
 	return &EventRepository{db: db}
+}
+
+// roundFloat64ToInt rounds a float64 pointer to int pointer
+func roundFloat64ToInt(f *float64) *int {
+	if f == nil {
+		return nil
+	}
+	rounded := int(math.Round(*f))
+	return &rounded
+}
+
+// intToFloat64 converts an int pointer to float64 pointer
+func intToFloat64(i *int) *float64 {
+	if i == nil {
+		return nil
+	}
+	f := float64(*i)
+	return &f
 }
 
 func (r *EventRepository) CreateBatch(ctx context.Context, sessionID uuid.UUID, events []models.EventData) error {
@@ -33,12 +52,20 @@ func (r *EventRepository) CreateBatch(ctx context.Context, sessionID uuid.UUID, 
 	`
 
 	for _, event := range events {
+		// Round float64 values to int for database (columns are INTEGER)
+		viewportX := roundFloat64ToInt(event.ViewportX)
+		viewportY := roundFloat64ToInt(event.ViewportY)
+		screenX := roundFloat64ToInt(event.ScreenX)
+		screenY := roundFloat64ToInt(event.ScreenY)
+		scrollX := roundFloat64ToInt(event.ScrollX)
+		scrollY := roundFloat64ToInt(event.ScrollY)
+
 		batch.Queue(query,
 			sessionID, event.Timestamp, event.EventType,
 			event.TargetElement, event.TargetSelector, event.TargetTag,
 			event.TargetID, event.TargetClass, event.PageURL,
-			event.ViewportX, event.ViewportY, event.ScreenX, event.ScreenY,
-			event.ScrollX, event.ScrollY, event.InputValue, event.InputMasked,
+			viewportX, viewportY, screenX, screenY,
+			scrollX, scrollY, event.InputValue, event.InputMasked,
 			event.KeyPressed, event.MouseButton, event.ClickCount, event.EventData,
 		)
 	}
@@ -77,17 +104,26 @@ func (r *EventRepository) GetBySessionID(ctx context.Context, sessionID uuid.UUI
 	var events []*models.Event
 	for rows.Next() {
 		event := &models.Event{}
+		// Scan into temporary int pointers for database INTEGER columns
+		var viewportX, viewportY, screenX, screenY, scrollX, scrollY *int
 		err := rows.Scan(
 			&event.EventID, &event.SessionID, &event.Timestamp, &event.EventType,
 			&event.TargetElement, &event.TargetSelector, &event.TargetTag,
 			&event.TargetID, &event.TargetClass, &event.PageURL,
-			&event.ViewportX, &event.ViewportY, &event.ScreenX, &event.ScreenY,
-			&event.ScrollX, &event.ScrollY, &event.InputValue, &event.InputMasked,
+			&viewportX, &viewportY, &screenX, &screenY,
+			&scrollX, &scrollY, &event.InputValue, &event.InputMasked,
 			&event.KeyPressed, &event.MouseButton, &event.ClickCount, &event.EventData,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}
+		// Convert int pointers to float64 pointers
+		event.ViewportX = intToFloat64(viewportX)
+		event.ViewportY = intToFloat64(viewportY)
+		event.ScreenX = intToFloat64(screenX)
+		event.ScreenY = intToFloat64(screenY)
+		event.ScrollX = intToFloat64(scrollX)
+		event.ScrollY = intToFloat64(scrollY)
 		events = append(events, event)
 	}
 
@@ -115,17 +151,26 @@ func (r *EventRepository) GetBySessionIDPaginated(ctx context.Context, sessionID
 	var events []*models.Event
 	for rows.Next() {
 		event := &models.Event{}
+		// Scan into temporary int pointers for database INTEGER columns
+		var viewportX, viewportY, screenX, screenY, scrollX, scrollY *int
 		err := rows.Scan(
 			&event.EventID, &event.SessionID, &event.Timestamp, &event.EventType,
 			&event.TargetElement, &event.TargetSelector, &event.TargetTag,
 			&event.TargetID, &event.TargetClass, &event.PageURL,
-			&event.ViewportX, &event.ViewportY, &event.ScreenX, &event.ScreenY,
-			&event.ScrollX, &event.ScrollY, &event.InputValue, &event.InputMasked,
+			&viewportX, &viewportY, &screenX, &screenY,
+			&scrollX, &scrollY, &event.InputValue, &event.InputMasked,
 			&event.KeyPressed, &event.MouseButton, &event.ClickCount, &event.EventData,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}
+		// Convert int pointers to float64 pointers
+		event.ViewportX = intToFloat64(viewportX)
+		event.ViewportY = intToFloat64(viewportY)
+		event.ScreenX = intToFloat64(screenX)
+		event.ScreenY = intToFloat64(screenY)
+		event.ScrollX = intToFloat64(scrollX)
+		event.ScrollY = intToFloat64(scrollY)
 		events = append(events, event)
 	}
 

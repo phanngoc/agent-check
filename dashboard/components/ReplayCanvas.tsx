@@ -10,6 +10,8 @@ interface ReplayCanvasProps {
   cursorPosition: { x: number; y: number } | null;
   clickIndicator: { x: number; y: number; timestamp: number } | null;
   opacity?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
 }
 
 interface CachedImage {
@@ -25,6 +27,8 @@ export default function ReplayCanvas({
   cursorPosition,
   clickIndicator,
   opacity = 1,
+  viewportWidth,
+  viewportHeight,
 }: ReplayCanvasProps) {
   console.log('[ReplayCanvas] Component render:', {
     hasScreenshot: !!screenshot,
@@ -243,105 +247,258 @@ export default function ReplayCanvas({
 
       if (cached && cached.loaded) {
         const img = cached.image;
-        const imgWidth = img.width;
-        const imgHeight = img.height;
+        const imgWidth = img.naturalWidth;
+        const imgHeight = img.naturalHeight;
 
-        // Calculate scaling to fit container (object-contain behavior)
-        const scaleX = containerWidth / imgWidth;
-        const scaleY = containerHeight / imgHeight;
-        const scale = Math.min(scaleX, scaleY);
+        // Check if we have viewport info and should use viewport simulation
+        const hasViewportInfo = viewportWidth && viewportHeight && viewportWidth > 0 && viewportHeight > 0;
+        const scrollX = currentEvent?.scroll_x ?? 0;
+        const scrollY = currentEvent?.scroll_y ?? 0;
 
-        const scaledWidth = imgWidth * scale;
-        const scaledHeight = imgHeight * scale;
+        let scale: number;
+        let offsetX: number;
+        let offsetY: number;
+        let scaleFactor: number;
 
-        // Center the image
-        const x = (containerWidth - scaledWidth) / 2;
-        const y = (containerHeight - scaledHeight) / 2;
+        // Calculate Device Pixel Ratio (DPR)
+        const dpr = hasViewportInfo ? imgWidth / viewportWidth : 1;
 
-        // Apply opacity
-        ctx.globalAlpha = opacity;
+        if (hasViewportInfo) {
+          // Viewport simulation mode: crop and display only viewport area
+          
+          // Scale CSS pixels to device pixels for source rectangle calculations
+          const scaledScrollX = scrollX * dpr;
+          const scaledScrollY = scrollY * dpr;
+          const scaledViewportWidth = viewportWidth! * dpr;
+          const scaledViewportHeight = viewportHeight! * dpr;
 
-        // Draw image
-        console.log('[ReplayCanvas] Drawing image:', {
-          screenshotId: screenshot.screenshot_id,
-          imgWidth,
-          imgHeight,
-          scaledWidth,
-          scaledHeight,
-          x,
-          y,
-          scale,
-          opacity,
-        });
-        ctx.drawImage(img, x, y, scaledWidth, scaledHeight);
+          // Calculate source rectangle in screenshot (viewport area)
+          const sx = Math.max(0, Math.min(scaledScrollX, imgWidth - scaledViewportWidth));
+          const sy = Math.max(0, Math.min(scaledScrollY, imgHeight - scaledViewportHeight));
+          const sw = Math.min(scaledViewportWidth, imgWidth - sx);
+          const sh = Math.min(scaledViewportHeight, imgHeight - sy);
+
+          // Calculate scaling to fit container (maintain aspect ratio)
+          const scaleX = containerWidth / sw;
+          const scaleY = containerHeight / sh;
+          scale = Math.min(scaleX, scaleY);
+          scaleFactor = scale;
+
+          // Calculate destination size
+          const scaledWidth = sw * scale;
+          const scaledHeight = sh * scale;
+
+          // Center the viewport in container
+          offsetX = (containerWidth - scaledWidth) / 2;
+          offsetY = (containerHeight - scaledHeight) / 2;
+
+          // Apply opacity
+          ctx.globalAlpha = opacity;
+
+          // Draw cropped viewport area from screenshot
+          console.log('[ReplayCanvas] Drawing viewport area:', {
+            screenshotId: screenshot.screenshot_id,
+            imgWidth,
+            imgHeight,
+            viewportWidth,
+            viewportHeight,
+            scrollX,
+            scrollY,
+            sx,
+            sy,
+            sw,
+            sh,
+            scaledWidth,
+            scaledHeight,
+            offsetX,
+            offsetY,
+            scale,
+            opacity,
+            dpr,
+          });
+          ctx.drawImage(
+            img,
+            sx, sy, sw, sh, // Source rectangle (viewport area in screenshot)
+            offsetX, offsetY, scaledWidth, scaledHeight // Destination rectangle (scaled to fit container)
+          );
+        } else {
+          // Fallback: original behavior (scale entire screenshot)
+          const scaleX = containerWidth / imgWidth;
+          const scaleY = containerHeight / imgHeight;
+          scale = Math.min(scaleX, scaleY);
+          scaleFactor = scale;
+
+          const scaledWidth = imgWidth * scale;
+          const scaledHeight = imgHeight * scale;
+
+          offsetX = (containerWidth - scaledWidth) / 2;
+          offsetY = (containerHeight - scaledHeight) / 2;
+
+          // Apply opacity
+          ctx.globalAlpha = opacity;
+
+          // Draw full image
+          console.log('[ReplayCanvas] Drawing full image (fallback):', {
+            screenshotId: screenshot.screenshot_id,
+            imgWidth,
+            imgHeight,
+            scaledWidth,
+            scaledHeight,
+            offsetX,
+            offsetY,
+            scale,
+            opacity,
+          });
+          ctx.drawImage(img, offsetX, offsetY, scaledWidth, scaledHeight);
+        }
 
         // Reset alpha
         ctx.globalAlpha = 1;
         console.log('[ReplayCanvas] Image drawn successfully');
 
-        // Draw overlays
-        const scaleFactor = scale; // Scale factor for viewport coordinates to canvas coordinates
-        const offsetX = x;
-        const offsetY = y;
-
         // Draw cursor position
         if (cursorPosition) {
-          const canvasX = offsetX + cursorPosition.x * scaleFactor;
-          const canvasY = offsetY + cursorPosition.y * scaleFactor;
+          // Check if cursor is within viewport (when using viewport simulation)
+          if (hasViewportInfo) {
+            if (
+              cursorPosition.x < 0 ||
+              cursorPosition.x >= viewportWidth! ||
+              cursorPosition.y < 0 ||
+              cursorPosition.y >= viewportHeight!
+            ) {
+              // Cursor is outside viewport, skip drawing
+            } else {
+              // Calculate cursor position relative to viewport (viewport_x is relative to viewport, not scroll)
+              // viewport_x and viewport_y are already relative to viewport (0,0 is top-left of viewport)
+              // Convert CSS pixels to Device pixels (x * dpr), then scale to Canvas pixels (* scaleFactor)
+              const canvasX = offsetX + cursorPosition.x * dpr * scaleFactor;
+              const canvasY = offsetY + cursorPosition.y * dpr * scaleFactor;
 
-          // Outer ping circle
-          ctx.strokeStyle = '#3b82f6'; // blue-500
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(canvasX, canvasY, 8, 0, Math.PI * 2);
-          ctx.stroke();
+              // Outer ping circle
+              ctx.strokeStyle = '#3b82f6'; // blue-500
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(canvasX, canvasY, 8, 0, Math.PI * 2);
+              ctx.stroke();
 
-          // Inner filled circle
-          ctx.fillStyle = 'rgba(59, 130, 246, 0.3)'; // blue-500 with opacity
-          ctx.beginPath();
-          ctx.arc(canvasX, canvasY, 8, 0, Math.PI * 2);
-          ctx.fill();
+              // Inner filled circle
+              ctx.fillStyle = 'rgba(59, 130, 246, 0.3)'; // blue-500 with opacity
+              ctx.beginPath();
+              ctx.arc(canvasX, canvasY, 8, 0, Math.PI * 2);
+              ctx.fill();
 
-          // Small center dot
-          ctx.fillStyle = '#3b82f6';
-          ctx.beginPath();
-          ctx.arc(canvasX, canvasY, 2, 0, Math.PI * 2);
-          ctx.fill();
+              // Small center dot
+              ctx.fillStyle = '#3b82f6';
+              ctx.beginPath();
+              ctx.arc(canvasX, canvasY, 2, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          } else {
+            // Fallback: original calculation
+            const canvasX = offsetX + cursorPosition.x * scaleFactor;
+            const canvasY = offsetY + cursorPosition.y * scaleFactor;
+
+            // Outer ping circle
+            ctx.strokeStyle = '#3b82f6'; // blue-500
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(canvasX, canvasY, 8, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // Inner filled circle
+            ctx.fillStyle = 'rgba(59, 130, 246, 0.3)'; // blue-500 with opacity
+            ctx.beginPath();
+            ctx.arc(canvasX, canvasY, 8, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Small center dot
+            ctx.fillStyle = '#3b82f6';
+            ctx.beginPath();
+            ctx.arc(canvasX, canvasY, 2, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
 
         // Draw click indicator (ripple effect)
         if (clickIndicator) {
-          const canvasX = offsetX + clickIndicator.x * scaleFactor;
-          const canvasY = offsetY + clickIndicator.y * scaleFactor;
-          const elapsed = Date.now() - clickIndicator.timestamp;
-          const duration = 600; // 600ms animation
-          const progress = Math.min(elapsed / duration, 1);
+          // Check if click is within viewport (when using viewport simulation)
+          if (hasViewportInfo) {
+            if (
+              clickIndicator.x < 0 ||
+              clickIndicator.x >= viewportWidth! ||
+              clickIndicator.y < 0 ||
+              clickIndicator.y >= viewportHeight!
+            ) {
+              // Click is outside viewport, skip drawing
+            } else {
+              // Calculate click position relative to viewport (viewport_x is relative to viewport, not scroll)
+              // Convert CSS pixels to Device pixels (x * dpr), then scale to Canvas pixels (* scaleFactor)
+              const canvasX = offsetX + clickIndicator.x * dpr * scaleFactor;
+              const canvasY = offsetY + clickIndicator.y * dpr * scaleFactor;
+              const elapsed = Date.now() - clickIndicator.timestamp;
+              const duration = 600; // 600ms animation
+              const progress = Math.min(elapsed / duration, 1);
 
-          // First ripple
-          const radius1 = 16 * progress;
-          const alpha1 = 1 - progress;
-          ctx.strokeStyle = `rgba(239, 68, 68, ${alpha1})`; // red-500
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(canvasX, canvasY, radius1, 0, Math.PI * 2);
-          ctx.stroke();
+              // First ripple
+              const radius1 = 16 * progress;
+              const alpha1 = 1 - progress;
+              ctx.strokeStyle = `rgba(239, 68, 68, ${alpha1})`; // red-500
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(canvasX, canvasY, radius1, 0, Math.PI * 2);
+              ctx.stroke();
 
-          // Second ripple (delayed)
-          if (elapsed > 120) {
-            const progress2 = Math.min((elapsed - 120) / duration, 1);
-            const radius2 = 16 * progress2;
-            const alpha2 = 1 - progress2;
-            ctx.strokeStyle = `rgba(239, 68, 68, ${alpha2})`;
+              // Second ripple (delayed)
+              if (elapsed > 120) {
+                const progress2 = Math.min((elapsed - 120) / duration, 1);
+                const radius2 = 16 * progress2;
+                const alpha2 = 1 - progress2;
+                ctx.strokeStyle = `rgba(239, 68, 68, ${alpha2})`;
+                ctx.beginPath();
+                ctx.arc(canvasX, canvasY, radius2, 0, Math.PI * 2);
+                ctx.stroke();
+              }
+
+              // Center dot
+              ctx.fillStyle = '#ef4444'; // red-500
+              ctx.beginPath();
+              ctx.arc(canvasX, canvasY, 3, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          } else {
+            // Fallback: original calculation
+            const canvasX = offsetX + clickIndicator.x * scaleFactor;
+            const canvasY = offsetY + clickIndicator.y * scaleFactor;
+            const elapsed = Date.now() - clickIndicator.timestamp;
+            const duration = 600; // 600ms animation
+            const progress = Math.min(elapsed / duration, 1);
+
+            // First ripple
+            const radius1 = 16 * progress;
+            const alpha1 = 1 - progress;
+            ctx.strokeStyle = `rgba(239, 68, 68, ${alpha1})`; // red-500
+            ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.arc(canvasX, canvasY, radius2, 0, Math.PI * 2);
+            ctx.arc(canvasX, canvasY, radius1, 0, Math.PI * 2);
             ctx.stroke();
-          }
 
-          // Center dot
-          ctx.fillStyle = '#ef4444'; // red-500
-          ctx.beginPath();
-          ctx.arc(canvasX, canvasY, 3, 0, Math.PI * 2);
-          ctx.fill();
+            // Second ripple (delayed)
+            if (elapsed > 120) {
+              const progress2 = Math.min((elapsed - 120) / duration, 1);
+              const radius2 = 16 * progress2;
+              const alpha2 = 1 - progress2;
+              ctx.strokeStyle = `rgba(239, 68, 68, ${alpha2})`;
+              ctx.beginPath();
+              ctx.arc(canvasX, canvasY, radius2, 0, Math.PI * 2);
+              ctx.stroke();
+            }
+
+            // Center dot
+            ctx.fillStyle = '#ef4444'; // red-500
+            ctx.beginPath();
+            ctx.arc(canvasX, canvasY, 3, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
 
         // Draw scroll position indicator

@@ -345,6 +345,8 @@ export default function SessionReplayPage() {
               cursorPosition={cursorPosition}
               clickIndicator={clickIndicator}
               opacity={screenshotOpacity}
+              viewportWidth={session.viewport_width}
+              viewportHeight={session.viewport_height}
             />
 
             {/* Playback controls */}

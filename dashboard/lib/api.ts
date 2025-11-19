@@ -11,6 +11,8 @@ export interface Session {
   device_type?: string;
   browser?: string;
   os?: string;
+  viewport_width?: number;
+  viewport_height?: number;
   duration_seconds?: number;
   pages_visited?: number;
   click_count?: number;

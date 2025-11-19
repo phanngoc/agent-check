@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { format } from 'date-fns';
 import { fetchSession, fetchSessionEvents, fetchSessionScreenshots, Session, SessionEvent, Screenshot } from '@/lib/api';
+import ReplayCanvas from '@/components/ReplayCanvas';
 
 export default function SessionReplayPage() {
   const params = useParams();
@@ -41,9 +42,14 @@ export default function SessionReplayPage() {
       // Find first screenshot with valid data_url
       const validScreenshot = screenshots.find(s => s.data_url);
       if (validScreenshot) {
-        // Always set screenshot if we don't have one, or if events are not loaded yet
+        // Always set screenshot if we don't have one, or if current screenshot doesn't have data_url
         // This ensures screenshot is displayed immediately, even before events are loaded
-        if (!currentScreenshot || events.length === 0) {
+        if (!currentScreenshot || !currentScreenshot.data_url) {
+          console.log('Setting initial screenshot:', {
+            screenshotId: validScreenshot.screenshot_id,
+            hasDataUrl: !!validScreenshot.data_url,
+            dataUrlLength: validScreenshot.data_url?.length || 0,
+          });
           setCurrentScreenshot(validScreenshot);
           setScreenshotOpacity(1);
         }
@@ -55,18 +61,22 @@ export default function SessionReplayPage() {
         })));
       }
     }
-  }, [screenshots, events.length, currentScreenshot]);
+  }, [screenshots, currentScreenshot]);
 
   useEffect(() => {
     // Update screenshot based on current event
     // Find the screenshot with the largest timestamp that is still <= event timestamp
     if (screenshots.length > 0) {
-      // If events are not loaded yet, keep the current screenshot (set by initialization)
+      // If events are not loaded yet, ensure we have a screenshot
       if (events.length === 0 || currentIndex >= events.length) {
         // Ensure we have a screenshot even if events are not loaded
-        if (!currentScreenshot) {
+        if (!currentScreenshot || !currentScreenshot.data_url) {
           const validScreenshot = screenshots.find(s => s.data_url) || screenshots[0];
           if (validScreenshot) {
+            console.log('Setting fallback screenshot (no events):', {
+              screenshotId: validScreenshot.screenshot_id,
+              hasDataUrl: !!validScreenshot.data_url,
+            });
             setCurrentScreenshot(validScreenshot);
             setScreenshotOpacity(1);
           }
@@ -76,7 +86,21 @@ export default function SessionReplayPage() {
 
       // Events are loaded, find screenshot matching current event
       const currentEvent = events[currentIndex];
-      if (!currentEvent) return;
+      if (!currentEvent) {
+        // If no current event, use first valid screenshot as fallback
+        if (!currentScreenshot || !currentScreenshot.data_url) {
+          const validScreenshot = screenshots.find(s => s.data_url) || screenshots[0];
+          if (validScreenshot) {
+            console.log('Setting fallback screenshot (no current event):', {
+              screenshotId: validScreenshot.screenshot_id,
+              hasDataUrl: !!validScreenshot.data_url,
+            });
+            setCurrentScreenshot(validScreenshot);
+            setScreenshotOpacity(1);
+          }
+        }
+        return;
+      }
 
       const eventTimestamp = new Date(currentEvent.timestamp).getTime();
       
@@ -95,22 +119,45 @@ export default function SessionReplayPage() {
           return currentTime > prevTime ? current : prev;
         });
       } else {
-        // If no screenshot before event timestamp, use the first valid screenshot
+        // If no screenshot before event timestamp, use the first valid screenshot as fallback
         targetScreenshot = screenshots.find(s => s.data_url) || screenshots[0];
+        console.log('No screenshot before event timestamp, using fallback:', {
+          screenshotId: targetScreenshot?.screenshot_id,
+          hasDataUrl: !!targetScreenshot?.data_url,
+        });
       }
       
-      // Update screenshot if it's different
-      if (targetScreenshot && currentScreenshot?.screenshot_id !== targetScreenshot.screenshot_id) {
-        // Clear any pending transition
-        if (screenshotTransitionRef.current) {
-          clearTimeout(screenshotTransitionRef.current);
+      // Update screenshot if it's different and has data_url
+      if (targetScreenshot && targetScreenshot.data_url) {
+        if (currentScreenshot?.screenshot_id !== targetScreenshot.screenshot_id) {
+          // Screenshot changed - use transition
+          console.log('Updating screenshot for event (with transition):', {
+            eventIndex: currentIndex,
+            eventType: currentEvent.event_type,
+            screenshotId: targetScreenshot.screenshot_id,
+            hasDataUrl: !!targetScreenshot.data_url,
+            previousScreenshotId: currentScreenshot?.screenshot_id,
+          });
+          // Clear any pending transition
+          if (screenshotTransitionRef.current) {
+            clearTimeout(screenshotTransitionRef.current);
+          }
+          setScreenshotOpacity(0);
+          screenshotTransitionRef.current = setTimeout(() => {
+            setCurrentScreenshot(targetScreenshot);
+            setScreenshotOpacity(1);
+            screenshotTransitionRef.current = null;
+          }, 150);
+        } else {
+          // Same screenshot - ensure opacity is 1
+          if (screenshotOpacity !== 1) {
+            console.log('Same screenshot, ensuring opacity is 1:', {
+              screenshotId: targetScreenshot.screenshot_id,
+              currentOpacity: screenshotOpacity,
+            });
+            setScreenshotOpacity(1);
+          }
         }
-        setScreenshotOpacity(0);
-        screenshotTransitionRef.current = setTimeout(() => {
-          setCurrentScreenshot(targetScreenshot);
-          setScreenshotOpacity(1);
-          screenshotTransitionRef.current = null;
-        }, 150);
       }
     }
     
@@ -121,6 +168,24 @@ export default function SessionReplayPage() {
       }
     };
   }, [currentIndex, events, screenshots, currentScreenshot]);
+
+  // Log when currentScreenshot changes for debugging
+  useEffect(() => {
+    if (currentScreenshot) {
+      console.log('Current screenshot state:', {
+        screenshotId: currentScreenshot.screenshot_id,
+        hasDataUrl: !!currentScreenshot.data_url,
+        dataUrlLength: currentScreenshot.data_url?.length || 0,
+        opacity: screenshotOpacity,
+      });
+      
+      // Ensure opacity is 1 if screenshot has data_url and we're not in a transition
+      if (currentScreenshot.data_url && screenshotOpacity === 0 && !screenshotTransitionRef.current) {
+        console.log('Fixing opacity: screenshot has data_url but opacity is 0, setting to 1');
+        setScreenshotOpacity(1);
+      }
+    }
+  }, [currentScreenshot, screenshotOpacity]);
 
   // Update event overlays when currentIndex changes
   useEffect(() => {
@@ -272,67 +337,15 @@ export default function SessionReplayPage() {
         {/* Main replay area */}
         <div className="lg:col-span-2">
           <div className="bg-white rounded-lg shadow overflow-hidden">
-            {/* Screenshot replay with event overlays */}
-            <div className="bg-gray-100 aspect-video flex items-center justify-center overflow-auto relative">
-              {currentScreenshot && currentScreenshot.data_url ? (
-                <>
-                  <img
-                    src={currentScreenshot.data_url}
-                    alt="Page screenshot"
-                    className="max-w-full h-auto transition-opacity duration-300"
-                    style={{ opacity: screenshotOpacity }}
-                  />
-                  
-                  {/* Cursor position overlay */}
-                  {cursorPosition && (
-                    <div
-                      className="absolute pointer-events-none transition-all duration-150 ease-out z-20"
-                      style={{
-                        left: `${cursorPosition.x}px`,
-                        top: `${cursorPosition.y}px`,
-                        transform: 'translate(-50%, -50%)',
-                      }}
-                    >
-                      <div className="w-4 h-4 border-2 border-blue-500 rounded-full bg-blue-500 bg-opacity-30" />
-                      <div className="absolute top-0 left-0 w-4 h-4 border-2 border-blue-500 rounded-full animate-ping opacity-75" />
-                    </div>
-                  )}
-
-                  {/* Click indicator (ripple effect) */}
-                  {clickIndicator && (
-                    <div
-                      className="absolute pointer-events-none z-30"
-                      style={{
-                        left: `${clickIndicator.x}px`,
-                        top: `${clickIndicator.y}px`,
-                        transform: 'translate(-50%, -50%)',
-                      }}
-                    >
-                      <div className="w-8 h-8 border-2 border-red-500 rounded-full animate-ping" />
-                      <div className="absolute top-0 left-0 w-8 h-8 border-2 border-red-500 rounded-full animate-ping" style={{ animationDelay: '0.2s' }} />
-                    </div>
-                  )}
-
-                  {/* Scroll position indicator */}
-                  {currentEvent && currentEvent.scroll_x !== undefined && currentEvent.scroll_y !== undefined && (
-                    <div className="absolute top-2 right-2 bg-black bg-opacity-50 text-white text-xs px-2 py-1 rounded z-10">
-                      Scroll: {currentEvent.scroll_x}, {currentEvent.scroll_y}
-                    </div>
-                  )}
-                </>
-              ) : screenshots.length > 0 ? (
-                <div className="text-gray-400">
-                  {screenshots.some(s => !s.data_url) 
-                    ? 'Screenshots loaded but missing data_url. Check API response.'
-                    : 'Loading screenshot...'}
-                </div>
-              ) : (
-                <div className="text-gray-400">
-                  No screenshot available
-                  {error && <div className="text-red-500 text-xs mt-2">{error}</div>}
-                </div>
-              )}
-            </div>
+            {/* Screenshot replay with event overlays - Canvas-based rendering */}
+            <ReplayCanvas
+              screenshot={currentScreenshot}
+              screenshots={screenshots}
+              currentEvent={currentEvent}
+              cursorPosition={cursorPosition}
+              clickIndicator={clickIndicator}
+              opacity={screenshotOpacity}
+            />
 
             {/* Playback controls */}
             <div className="p-4 border-t">

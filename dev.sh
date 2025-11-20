@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Development script to run all 4 modules in parallel
-# Backend (Go), Dashboard (Next.js), Tracker (TypeScript), and Demo (Laravel)
+# Development script to run all 5 modules in parallel
+# Backend (Go), Dashboard (Next.js), Tracker (TypeScript), Demo (Laravel), and Panel (Rust)
 
 set -e
 
@@ -83,6 +83,14 @@ echo -e "${BLUE}[DEMO]${NC} Starting Laravel app..."
     cd demo/blog
     php artisan serve
 ) | sed 's/^/[DEMO] /' &
+PIDS+=($!)
+
+# Start Panel (Rust with cargo-watch for hot reload)
+echo -e "${BLUE}[PANEL]${NC} Starting Rust panel with cargo-watch (hot reload)..."
+(
+    cd panel
+    ./dev.sh
+) | sed 's/^/[PANEL] /' &
 PIDS+=($!)
 
 echo ""

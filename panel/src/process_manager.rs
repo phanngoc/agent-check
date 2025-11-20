@@ -267,11 +267,16 @@ impl ProcessManager {
         let uptime = managed.start_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
         
         // Get CPU and memory usage using sysinfo
+        // sysinfo requires at least 2 refreshes with a delay between them to calculate CPU usage accurately
         let mut system = sysinfo::System::new();
         system.refresh_processes();
         
-        let cpu_usage = 0.0; // Will be calculated in metrics module
-        let memory_usage = 0; // Will be calculated in metrics module
+        // Wait a short time before second refresh to allow CPU usage calculation
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        system.refresh_processes();
+        
+        let cpu_usage = 0.0;
+        let memory_usage = 0;
 
         if let Some(pid) = pid {
             if let Some(process) = system.process(sysinfo::Pid::from(pid as usize)) {

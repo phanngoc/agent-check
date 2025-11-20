@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::docker_manager::DockerManager;
 use crate::log_manager::LogManager;
 use crate::metrics::MetricsCollector;
-use crate::models::{ContainerInfo, Service, ServiceStatus};
+use crate::models::{ContainerInfo, FilteredLogsResponse, LogEntry, Service, ServiceStatus};
 use crate::process_manager::ProcessManager;
 use crate::service_detector::ServiceDetector;
 use std::collections::HashMap;
@@ -88,15 +88,17 @@ pub async fn start_server(config: Config) -> Result<()> {
     };
 
     // Build router
+    // Note: More specific routes must come before generic routes
     let app = Router::new()
         .route("/api/services", get(list_services))
         .route("/api/services/:id/start", post(start_service))
         .route("/api/services/:id/stop", post(stop_service))
         .route("/api/services/:id/restart", post(restart_service))
         .route("/api/services/:id/status", get(get_service_status))
-        .route("/api/services/:id/logs", get(get_service_logs))
         .route("/api/services/:id/logs/stream", get(stream_service_logs))
+        .route("/api/services/:id/logs", get(get_service_logs))
         .route("/api/services/:id/metrics", get(get_service_metrics))
+        .route("/api/services/:id", get(get_service_detail))
         .route("/api/containers", get(list_containers))
         .route("/api/containers/:id/start", post(start_container))
         .route("/api/containers/:id/stop", post(stop_container))
@@ -132,7 +134,7 @@ async fn list_services(State(state): State<AppState>) -> Json<Vec<Service>> {
             service.status = actual_status;
             
             // Also sync other fields from process_manager if available
-            if let Some(process_info) = state.process_manager.get_process_info(&service.id).await {
+            if let Some(_process_info) = state.process_manager.get_process_info(&service.id).await {
                 // Update restart_count if available in the managed process
                 // Note: We can't directly access restart_count from process_info,
                 // but we can keep the status sync which is the main issue
@@ -266,19 +268,108 @@ async fn get_service_status(
     Ok(Json(status))
 }
 
+async fn get_service_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Service>, StatusCode> {
+    debug!("[DEBUG] get_service_detail called for service: {}", id);
+    
+    let services = state.services.read().await;
+    debug!("[DEBUG] Total services available: {}", services.len());
+    debug!("[DEBUG] Service IDs: {:?}", services.iter().map(|s| &s.id).collect::<Vec<_>>());
+    
+    let service = services.iter().find(|s| s.id == id)
+        .ok_or_else(|| {
+            debug!("[DEBUG] Service not found: {}", id);
+            StatusCode::NOT_FOUND
+        })?;
+    
+    debug!("[DEBUG] Service found: {} - {}", service.id, service.name);
+    
+    // Sync status from process_manager
+    let mut service_clone = service.clone();
+    if let Some(actual_status) = state.process_manager.get_service_status(&id).await {
+        debug!("[DEBUG] Syncing status for {}: {:?} -> {:?}", id, service_clone.status, actual_status);
+        service_clone.status = actual_status;
+    }
+    
+    Ok(Json(service_clone))
+}
+
 async fn get_service_logs(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<String>>, StatusCode> {
-    let lines = params.get("lines")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(100);
+) -> Result<Json<FilteredLogsResponse>, StatusCode> {
+    // Check if filtering is requested
+    let has_filter = params.contains_key("level") 
+        || params.contains_key("from") 
+        || params.contains_key("to") 
+        || params.contains_key("search");
     
-    let logs = state.log_manager.get_logs(&id, Some(lines)).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    Ok(Json(logs))
+    if has_filter {
+        // Use filtered logs
+        let level = params.get("level").map(|s| s.as_str());
+        let from = params.get("from").and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+                .or_else(|| s.parse::<chrono::DateTime<chrono::Utc>>().ok())
+        });
+        let to = params.get("to").and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+                .or_else(|| s.parse::<chrono::DateTime<chrono::Utc>>().ok())
+        });
+        let search = params.get("search").map(|s| s.as_str());
+        let operator = params.get("operator").map(|s| s.as_str()).unwrap_or("and");
+        let limit = params.get("limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1000);
+        
+        let result = state.log_manager.get_filtered_logs(
+            &id,
+            level,
+            from,
+            to,
+            search,
+            operator == "or",
+            limit,
+        ).await
+        .map_err(|e| {
+            error!("Failed to get filtered logs: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        
+        Ok(Json(result))
+    } else {
+        // Use simple logs (backward compatibility)
+        let lines = params.get("lines")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(100);
+        
+        let log_lines = state.log_manager.get_logs(&id, Some(lines)).await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        
+        // Convert to LogEntry format
+        let logs: Vec<LogEntry> = log_lines.into_iter().map(|line| {
+            let (level, timestamp) = crate::log_manager::LogManager::parse_log_line(&line);
+            LogEntry {
+                timestamp,
+                service_id: id.clone(),
+                level,
+                message: line,
+            }
+        }).collect();
+        
+        let total = logs.len();
+        Ok(Json(FilteredLogsResponse {
+            logs,
+            total,
+            filtered: total,
+        }))
+    }
 }
 
 async fn stream_service_logs(
@@ -319,10 +410,38 @@ async fn get_service_metrics(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ProcessInfo>, StatusCode> {
-    let process_info = state.process_manager.get_process_info(&id).await
-        .ok_or(StatusCode::NOT_FOUND)?;
+    debug!("[DEBUG] get_service_metrics called for service: {}", id);
     
-    Ok(Json(process_info))
+    // First, check if service exists in the services list
+    let services = state.services.read().await;
+    let service_exists = services.iter().any(|s| s.id == id);
+    drop(services);
+    
+    if !service_exists {
+        debug!("[DEBUG] Service {} not found in services list", id);
+        return Err(StatusCode::NOT_FOUND);
+    }
+    
+    debug!("[DEBUG] Service {} exists, checking process info", id);
+    
+    // Try to get process info from process_manager
+    if let Some(process_info) = state.process_manager.get_process_info(&id).await {
+        debug!("[DEBUG] Found process info for service {}: pid={:?}, cpu={:.2}%, memory={} bytes", 
+            id, process_info.pid, process_info.cpu_usage, process_info.memory_usage);
+        return Ok(Json(process_info));
+    }
+    
+    // Service exists but not started yet, return default metrics
+    debug!("[DEBUG] Service {} exists but not started, returning default metrics", id);
+    let default_metrics = crate::models::ProcessInfo {
+        pid: None,
+        cpu_usage: 0.0,
+        memory_usage: 0,
+        uptime: 0,
+        status: crate::models::ServiceStatus::Stopped,
+    };
+    
+    Ok(Json(default_metrics))
 }
 
 async fn list_containers(

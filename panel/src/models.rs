@@ -85,3 +85,10 @@ pub struct Metrics {
     pub timestamp: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilteredLogsResponse {
+    pub logs: Vec<LogEntry>,
+    pub total: usize,
+    pub filtered: usize,
+}
+

@@ -1,0 +1,31 @@
+# Cargo Watch configuration for Rust Panel
+# This file configures cargo-watch to ignore certain files and directories
+
+[watch]
+# Watch only these paths (relative to project root)
+# If not specified, watches the entire project
+# paths = ["src"]
+
+# Ignore these paths (relative to project root)
+ignore = [
+    "target",
+    "logs",
+    "panel/logs",
+    "*.log",
+    ".git",
+    "Cargo.lock",
+    "*.md",
+    "static",
+]
+
+# Watch for changes in these file types
+# Default: all files
+# watchexec = { ignore = ["target", "logs"] }
+
+# Delay before rebuilding (in seconds)
+# This helps avoid multiple rebuilds when saving multiple files
+delay = 0.2
+
+# Clear screen on rebuild
+clear = true
+

@@ -3,9 +3,13 @@ const API_BASE = '/api';
 let services = [];
 let containers = [];
 let logEventSources = {};
+let currentServiceId = null;
+let logEventSource = null;
+let metricsInterval = null;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
+    setupRouting();
     setupTabs();
     loadServices();
     loadContainers();
@@ -13,17 +17,96 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Auto-refresh every 5 seconds
     setInterval(() => {
-        loadServices();
-        loadContainers();
-        loadSystemMetrics();
+        if (!currentServiceId) {
+            loadServices();
+            loadContainers();
+            loadSystemMetrics();
+        }
     }, 5000);
     
     document.getElementById('refreshBtn').addEventListener('click', () => {
-        loadServices();
-        loadContainers();
-        loadSystemMetrics();
+        if (currentServiceId) {
+            loadServiceDetail(currentServiceId);
+        } else {
+            loadServices();
+            loadContainers();
+            loadSystemMetrics();
+        }
     });
 });
+
+// Hash-based routing
+function setupRouting() {
+    window.addEventListener('hashchange', handleRoute);
+    handleRoute();
+}
+
+function handleRoute() {
+    const hash = window.location.hash;
+    if (hash.startsWith('#/services/')) {
+        const serviceId = hash.replace('#/services/', '');
+        navigateToServiceDetail(serviceId);
+    } else {
+        navigateToHome();
+    }
+}
+
+function navigateToServiceDetail(serviceId) {
+    currentServiceId = serviceId;
+    window.location.hash = `#/services/${serviceId}`;
+    
+    // Hide main content, show detail page
+    document.querySelectorAll('.tab-content').forEach(tab => {
+        if (tab.id === 'serviceDetailPage') {
+            tab.classList.add('active');
+        } else {
+            tab.classList.remove('active');
+        }
+    });
+    
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    
+    loadServiceDetail(serviceId);
+}
+
+function navigateToHome() {
+    currentServiceId = null;
+    window.location.hash = '';
+    
+    // Stop metrics interval if running
+    if (metricsInterval) {
+        clearInterval(metricsInterval);
+        metricsInterval = null;
+    }
+    
+    // Close log stream if open
+    if (logEventSource) {
+        logEventSource.close();
+        logEventSource = null;
+    }
+    
+    // Show main content, hide detail page
+    document.querySelectorAll('.tab-content').forEach(tab => {
+        if (tab.id === 'serviceDetailPage') {
+            tab.classList.remove('active');
+        } else {
+            // Restore previous tab state
+            if (tab.id === 'servicesTab') {
+                tab.classList.add('active');
+            }
+        }
+    });
+    
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        if (btn.dataset.tab === 'services') {
+            btn.classList.add('active');
+        }
+    });
+    
+    loadServices();
+    loadContainers();
+    loadSystemMetrics();
+}
 
 // Tab switching
 function setupTabs() {
@@ -108,6 +191,7 @@ function renderServices() {
                     : `<button class="btn btn-primary" onclick="startService('${service.id}')">Start</button>`
                 }
                 <button class="btn btn-secondary" onclick="viewLogs('${service.id}', '${service.name}')">Logs</button>
+                <button class="btn btn-secondary" onclick="navigateToServiceDetail('${service.id}')">View Details</button>
             </div>
         </div>
     `).join('');
@@ -425,5 +509,257 @@ window.onclick = function(event) {
     if (event.target === modal) {
         closeLogModal();
     }
+}
+
+// Service Detail Page Functions
+async function loadServiceDetail(serviceId) {
+    try {
+        // Load service info
+        const serviceResponse = await fetch(`${API_BASE}/services/${serviceId}`);
+        if (!serviceResponse.ok) {
+            throw new Error('Service not found');
+        }
+        const service = await serviceResponse.json();
+        
+        // Update title
+        document.getElementById('serviceDetailTitle').textContent = service.name;
+        
+        // Render service info
+        renderServiceInfo(service);
+        
+        // Load metrics
+        loadServiceDetailMetrics(serviceId);
+        
+        // Start metrics interval
+        if (metricsInterval) {
+            clearInterval(metricsInterval);
+        }
+        metricsInterval = setInterval(() => {
+            loadServiceDetailMetrics(serviceId);
+        }, 5000);
+        
+        // Load initial logs
+        await applyLogFilter();
+        
+        // Start log streaming
+        startLogStreaming(serviceId);
+        
+    } catch (error) {
+        console.error('Failed to load service detail:', error);
+        alert('Failed to load service details: ' + error.message);
+    }
+}
+
+function renderServiceInfo(service) {
+    const grid = document.getElementById('serviceInfoGrid');
+    const envVars = Object.entries(service.environment || {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join(', ') || 'None';
+    
+    grid.innerHTML = `
+        <div class="info-item">
+            <div class="info-label">ID:</div>
+            <div class="info-value">${service.id}</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Name:</div>
+            <div class="info-value">${service.name}</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Type:</div>
+            <div class="info-value">${service.service_type}</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Status:</div>
+            <div class="info-value"><span class="status-badge status-${service.status}">${service.status}</span></div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Command:</div>
+            <div class="info-value"><code>${escapeHtml(service.command)}</code></div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Working Directory:</div>
+            <div class="info-value"><code>${escapeHtml(service.working_dir)}</code></div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Port:</div>
+            <div class="info-value">${service.port || 'N/A'}</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Auto Restart:</div>
+            <div class="info-value">${service.auto_restart ? 'Yes' : 'No'}</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Restart Count:</div>
+            <div class="info-value">${service.restart_count}</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Created At:</div>
+            <div class="info-value">${new Date(service.created_at).toLocaleString()}</div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Updated At:</div>
+            <div class="info-value">${new Date(service.updated_at).toLocaleString()}</div>
+        </div>
+        <div class="info-item info-item-full">
+            <div class="info-label">Environment Variables:</div>
+            <div class="info-value"><code>${escapeHtml(envVars)}</code></div>
+        </div>
+    `;
+}
+
+async function loadServiceDetailMetrics(serviceId) {
+    try {
+        const response = await fetch(`${API_BASE}/services/${serviceId}/metrics`);
+        const metrics = await response.json();
+        
+        const metricsEl = document.getElementById('serviceDetailMetrics');
+        if (metricsEl) {
+            metricsEl.innerHTML = `
+                <div class="metric-box">
+                    <div class="metric-box-label">CPU</div>
+                    <div class="metric-box-value">${metrics.cpu_usage.toFixed(1)}%</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-box-label">Memory</div>
+                    <div class="metric-box-value">${formatBytes(metrics.memory_usage)}</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-box-label">Uptime</div>
+                    <div class="metric-box-value">${formatUptime(metrics.uptime)}</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-box-label">PID</div>
+                    <div class="metric-box-value">${metrics.pid || 'N/A'}</div>
+                </div>
+            `;
+        }
+    } catch (error) {
+        console.error('Failed to load metrics:', error);
+    }
+}
+
+async function applyLogFilter() {
+    if (!currentServiceId) return;
+    
+    const level = document.getElementById('filterLevel').value;
+    const from = document.getElementById('filterFrom').value;
+    const to = document.getElementById('filterTo').value;
+    const search = document.getElementById('filterSearch').value;
+    const operator = document.querySelector('input[name="filterOperator"]:checked').value;
+    const limit = parseInt(document.getElementById('filterLimit').value) || 1000;
+    
+    // Build query params
+    const params = new URLSearchParams();
+    if (level && level !== 'all') params.append('level', level);
+    if (from) {
+        // Convert datetime-local to ISO string
+        const fromDate = new Date(from);
+        params.append('from', fromDate.toISOString());
+    }
+    if (to) {
+        const toDate = new Date(to);
+        params.append('to', toDate.toISOString());
+    }
+    if (search) params.append('search', search);
+    params.append('operator', operator);
+    params.append('limit', limit.toString());
+    
+    try {
+        const response = await fetch(`${API_BASE}/services/${currentServiceId}/logs?${params.toString()}`);
+        if (!response.ok) {
+            throw new Error('Failed to fetch logs');
+        }
+        const data = await response.json();
+        
+        renderFilteredLogs(data.logs);
+        
+        // Update logs info
+        const infoEl = document.getElementById('logsInfo');
+        if (infoEl) {
+            infoEl.textContent = `Showing ${data.filtered} of ${data.total} logs`;
+        }
+    } catch (error) {
+        console.error('Failed to apply filter:', error);
+        alert('Failed to apply filter: ' + error.message);
+    }
+}
+
+function clearLogFilter() {
+    document.getElementById('filterLevel').value = 'all';
+    document.getElementById('filterFrom').value = '';
+    document.getElementById('filterTo').value = '';
+    document.getElementById('filterSearch').value = '';
+    document.querySelector('input[name="filterOperator"][value="and"]').checked = true;
+    document.getElementById('filterLimit').value = '1000';
+    applyLogFilter();
+}
+
+function renderFilteredLogs(logs) {
+    const logsEl = document.getElementById('serviceLogs');
+    if (!logsEl) return;
+    
+    if (logs.length === 0) {
+        logsEl.innerHTML = '<div class="empty-state">No logs found</div>';
+        return;
+    }
+    
+    logsEl.innerHTML = logs.map(log => {
+        const timestamp = new Date(log.timestamp).toLocaleString();
+        return `<div class="log-line log-line-${log.level}">
+            <span class="log-timestamp">[${timestamp}]</span>
+            <span class="log-level">[${log.level.toUpperCase()}]</span>
+            <span class="log-message">${escapeHtml(log.message)}</span>
+        </div>`;
+    }).join('');
+    
+    logsEl.scrollTop = logsEl.scrollHeight;
+}
+
+function startLogStreaming(serviceId) {
+    // Close existing stream
+    if (logEventSource) {
+        logEventSource.close();
+    }
+    
+    // Start new stream
+    logEventSource = new EventSource(`${API_BASE}/services/${serviceId}/logs/stream`);
+    logEventSource.onmessage = (event) => {
+        try {
+            const logEntry = JSON.parse(event.data);
+            
+            // Apply current filter to streamed logs
+            const level = document.getElementById('filterLevel').value;
+            const search = document.getElementById('filterSearch').value;
+            
+            let shouldShow = true;
+            
+            if (level && level !== 'all' && logEntry.level.toLowerCase() !== level.toLowerCase()) {
+                shouldShow = false;
+            }
+            
+            if (search && !logEntry.message.toLowerCase().includes(search.toLowerCase())) {
+                shouldShow = false;
+            }
+            
+            if (shouldShow) {
+                const logsEl = document.getElementById('serviceLogs');
+                if (logsEl) {
+                    const timestamp = new Date(logEntry.timestamp).toLocaleString();
+                    const logLine = document.createElement('div');
+                    logLine.className = `log-line log-line-${logEntry.level}`;
+                    logLine.innerHTML = `
+                        <span class="log-timestamp">[${timestamp}]</span>
+                        <span class="log-level">[${logEntry.level.toUpperCase()}]</span>
+                        <span class="log-message">${escapeHtml(logEntry.message)}</span>
+                    `;
+                    logsEl.appendChild(logLine);
+                    logsEl.scrollTop = logsEl.scrollHeight;
+                }
+            }
+        } catch (e) {
+            console.error('Error parsing log entry:', e);
+        }
+    };
 }
 

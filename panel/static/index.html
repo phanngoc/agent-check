@@ -30,6 +30,87 @@
         <div id="containersTab" class="tab-content">
             <div class="containers-grid" id="containersGrid"></div>
         </div>
+
+        <!-- Service Detail Page -->
+        <div id="serviceDetailPage" class="tab-content">
+            <div class="service-detail-container">
+                <div class="detail-header">
+                    <button class="btn btn-secondary" onclick="navigateToHome()">← Back</button>
+                    <h2 id="serviceDetailTitle">Service Details</h2>
+                </div>
+
+                <!-- Service Info Section -->
+                <div class="detail-section">
+                    <h3>Service Information</h3>
+                    <div class="info-grid" id="serviceInfoGrid"></div>
+                </div>
+
+                <!-- Metrics Section -->
+                <div class="detail-section">
+                    <h3>Metrics</h3>
+                    <div class="metrics-row" id="serviceDetailMetrics"></div>
+                </div>
+
+                <!-- Log Filter Section -->
+                <div class="detail-section">
+                    <h3>Logs Filter</h3>
+                    <div class="filter-form">
+                        <div class="filter-row">
+                            <div class="filter-group">
+                                <label>Level:</label>
+                                <select id="filterLevel">
+                                    <option value="all">All</option>
+                                    <option value="info">Info</option>
+                                    <option value="error">Error</option>
+                                    <option value="warn">Warn</option>
+                                    <option value="debug">Debug</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <label>From:</label>
+                                <input type="datetime-local" id="filterFrom">
+                            </div>
+                            <div class="filter-group">
+                                <label>To:</label>
+                                <input type="datetime-local" id="filterTo">
+                            </div>
+                        </div>
+                        <div class="filter-row">
+                            <div class="filter-group filter-group-full">
+                                <label>Search Message:</label>
+                                <input type="text" id="filterSearch" placeholder="Search in log messages...">
+                            </div>
+                        </div>
+                        <div class="filter-row">
+                            <div class="filter-group">
+                                <label>Operator:</label>
+                                <div class="radio-group">
+                                    <label><input type="radio" name="filterOperator" value="and" checked> AND</label>
+                                    <label><input type="radio" name="filterOperator" value="or"> OR</label>
+                                </div>
+                            </div>
+                            <div class="filter-group">
+                                <label>Limit:</label>
+                                <input type="number" id="filterLimit" value="1000" min="1" max="10000">
+                            </div>
+                            <div class="filter-group">
+                                <button class="btn btn-primary" onclick="applyLogFilter()">Apply Filter</button>
+                                <button class="btn btn-secondary" onclick="clearLogFilter()">Clear</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Logs Display Section -->
+                <div class="detail-section">
+                    <div class="logs-header">
+                        <h3>Logs</h3>
+                        <div class="logs-info" id="logsInfo"></div>
+                    </div>
+                    <div id="serviceLogs" class="log-content log-content-full"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Log Viewer Modal -->

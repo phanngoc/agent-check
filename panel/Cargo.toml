@@ -23,4 +23,5 @@ yaml-rust = "0.4"
 async-stream = "0.3"
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["codec", "io"] }
+regex = "1"
 

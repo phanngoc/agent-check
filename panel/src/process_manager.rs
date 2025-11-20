@@ -6,12 +6,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 use chrono::Utc;
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 
 pub struct ProcessManager {
     processes: Arc<RwLock<HashMap<String, ManagedProcess>>>,
     auto_restart: bool,
     max_restart_attempts: u32,
+    logs_dir: std::path::PathBuf,
 }
 
 struct ManagedProcess {
@@ -23,11 +24,12 @@ struct ManagedProcess {
 }
 
 impl ProcessManager {
-    pub fn new(auto_restart: bool, max_restart_attempts: u32) -> Self {
+    pub fn new(auto_restart: bool, max_restart_attempts: u32, logs_dir: std::path::PathBuf) -> Self {
         Self {
             processes: Arc::new(RwLock::new(HashMap::new())),
             auto_restart,
             max_restart_attempts,
+            logs_dir,
         }
     }
 
@@ -35,52 +37,151 @@ impl ProcessManager {
         let service_id = service.id.clone();
         
         info!("Starting service: {}", service_id);
+        debug!("[DEBUG] start_service called for service_id: {}", service_id);
 
-        // Log file path - will be managed by log_manager
-        // For process output, we'll use a simple approach
-        let log_path = format!("logs/{}.log", service_id);
+        // Log file path - use absolute path from logs_dir
+        let log_path = self.logs_dir.join(format!("{}.log", service_id));
+        debug!("[DEBUG] Log file path: {:?}", log_path);
         
         // Create logs directory if it doesn't exist
-        if let Some(parent) = std::path::Path::new(&log_path).parent() {
+        if let Some(parent) = log_path.parent() {
+            debug!("[DEBUG] Creating logs directory: {:?}", parent);
             std::fs::create_dir_all(parent)
                 .context("Failed to create logs directory")?;
         }
         
-        // Create log file
+        // Create log file with explicit flush
+        debug!("[DEBUG] Opening log file: {:?}", log_path);
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
-            .context("Failed to create log file")?;
+            .context(format!("Failed to create log file at {:?}", log_path))?;
+        
+        info!("Log file created at: {:?}", log_path);
+        debug!("[DEBUG] Log file opened successfully");
 
         // Parse command
+        debug!("[DEBUG] Parsing command: '{}'", service.command);
         let parts: Vec<&str> = service.command.split_whitespace().collect();
+        debug!("[DEBUG] Command parts: {:?} (count: {})", parts, parts.len());
+        
         if parts.is_empty() {
+            debug!("[DEBUG] ERROR: Empty command");
             anyhow::bail!("Empty command");
         }
 
-        let mut cmd = Command::new(parts[0]);
+        let executable = parts[0];
+        debug!("[DEBUG] Executable: '{}'", executable);
+        
+        let mut cmd = Command::new(executable);
         
         // Add arguments
-        for arg in parts.iter().skip(1) {
+        let args: Vec<&str> = parts.iter().skip(1).copied().collect();
+        debug!("[DEBUG] Command arguments: {:?}", args);
+        for arg in args.iter() {
             cmd.arg(arg);
         }
 
         // Set working directory
-        cmd.current_dir(&service.working_dir);
+        let working_dir = std::path::Path::new(&service.working_dir);
+        debug!("[DEBUG] Working directory (raw): '{}'", service.working_dir);
+        debug!("[DEBUG] Working directory exists: {}", working_dir.exists());
+        
+        if !working_dir.exists() {
+            debug!("[DEBUG] ERROR: Working directory does not exist: {}", service.working_dir);
+            anyhow::bail!("Working directory does not exist: {}", service.working_dir);
+        }
+        
+        let working_dir_abs = working_dir.canonicalize()
+            .unwrap_or_else(|_| working_dir.to_path_buf());
+        debug!("[DEBUG] Working directory (absolute): {:?}", working_dir_abs);
+        
+        cmd.current_dir(working_dir);
+        info!("Setting working directory to: {:?}", working_dir);
 
         // Set environment variables
+        debug!("[DEBUG] Setting environment variables (count: {})", service.environment.len());
         for (key, value) in &service.environment {
+            debug!("[DEBUG]   {} = {}", key, value);
             cmd.env(key, value);
         }
+        
+        // Preserve PATH and other important env vars
+        let path_env = std::env::var("PATH").unwrap_or_default();
+        debug!("[DEBUG] PATH environment variable: {}", path_env);
+        cmd.env("PATH", path_env);
 
         // Redirect output to log file
+        debug!("[DEBUG] Redirecting stdout and stderr to log file");
         cmd.stdout(Stdio::from(log_file.try_clone()?));
         cmd.stderr(Stdio::from(log_file));
+        
+        info!("Spawning process: command='{}', working_dir='{:?}', log_path='{:?}'", 
+            service.command, working_dir, log_path);
+        debug!("[DEBUG] About to spawn process - executable: '{}', args: {:?}, working_dir: {:?}", 
+            executable, args, working_dir_abs);
 
         // Spawn process
-        let child = cmd.spawn().context("Failed to spawn process")?;
+        debug!("[DEBUG] Calling cmd.spawn()...");
+        let spawn_result = cmd.spawn();
+        
+        let mut child = match spawn_result {
+            Ok(child) => {
+                let pid = child.id();
+                debug!("[DEBUG] Process spawned successfully - PID: {}", pid);
+                child
+            }
+            Err(e) => {
+                debug!("[DEBUG] ERROR: Failed to spawn process - error: {:?}", e);
+                debug!("[DEBUG] ERROR: Executable path: '{}'", executable);
+                debug!("[DEBUG] ERROR: Working directory: {:?}", working_dir_abs);
+                debug!("[DEBUG] ERROR: Command: '{}'", service.command);
+                return Err(anyhow::anyhow!("Failed to spawn process '{}' in directory '{}'. Make sure the command is in PATH. Error: {}", 
+                    service.command, service.working_dir, e))
+                    .context(format!("Failed to spawn process '{}' in directory '{}'. Make sure the command is in PATH.", 
+                        service.command, service.working_dir));
+            }
+        };
+        
         let pid = child.id();
+        info!("Process spawned successfully: PID={}, service={}", pid, service_id);
+        debug!("[DEBUG] Process PID: {}, waiting 500ms before checking status", pid);
+        
+        // Give process a moment to start and potentially write to log
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        
+        // Check if process is still running
+        debug!("[DEBUG] Checking process status for PID: {}", pid);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                warn!("Process {} exited immediately with status: {:?}", service_id, status);
+                debug!("[DEBUG] Process exited immediately - status: {:?}", status);
+                debug!("[DEBUG] Reading log file for error output: {:?}", log_path);
+                // Try to read error from log file
+                if let Ok(content) = std::fs::read_to_string(&log_path) {
+                    if !content.is_empty() {
+                        error!("Process {} error output: {}", service_id, content);
+                        debug!("[DEBUG] Log file content (first 500 chars): {}", 
+                            content.chars().take(500).collect::<String>());
+                    } else {
+                        debug!("[DEBUG] Log file is empty");
+                    }
+                } else {
+                    debug!("[DEBUG] Failed to read log file");
+                }
+                anyhow::bail!("Process exited immediately after start");
+            }
+            Ok(None) => {
+                // Process is still running, good
+                info!("Process {} is running (PID={})", service_id, pid);
+                debug!("[DEBUG] Process is still running - PID: {}", pid);
+            }
+            Err(e) => {
+                warn!("Error checking process status: {}", e);
+                debug!("[DEBUG] ERROR checking process status: {:?}", e);
+            }
+        }
 
         service.status = ServiceStatus::Running;
         service.updated_at = Utc::now();
@@ -99,6 +200,7 @@ impl ProcessManager {
         let processes_clone = self.processes.clone();
         let auto_restart = self.auto_restart;
         let max_attempts = self.max_restart_attempts;
+        let logs_dir = self.logs_dir.clone();
         let service_clone = service.clone();
 
         tokio::spawn(async move {
@@ -107,6 +209,7 @@ impl ProcessManager {
                 processes_clone,
                 auto_restart,
                 max_attempts,
+                logs_dir,
                 service_clone,
             ).await;
         });
@@ -198,6 +301,7 @@ impl ProcessManager {
         processes: Arc<RwLock<HashMap<String, ManagedProcess>>>,
         auto_restart: bool,
         max_attempts: u32,
+        logs_dir: std::path::PathBuf,
         service: Service,
     ) {
         loop {
@@ -231,11 +335,12 @@ impl ProcessManager {
                             // Restart after a delay
                             tokio::time::sleep(Duration::from_secs(2)).await;
                             
-                            // Recreate command
+                            // Recreate command - use logs_dir
+                            let log_path = logs_dir.join(format!("{}.log", service_id));
                             let log_file = match std::fs::OpenOptions::new()
                                 .create(true)
                                 .append(true)
-                                .open(format!("logs/{}.log", service_id))
+                                .open(&log_path)
                             {
                                 Ok(f) => f,
                                 Err(e) => {

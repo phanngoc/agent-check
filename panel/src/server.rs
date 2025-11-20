@@ -22,8 +22,9 @@ use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
 };
-use tracing::{info, error};
+use tracing::{info, error, debug};
 use futures::Stream;
+use chrono::Utc;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -40,16 +41,17 @@ pub async fn start_server(config: Config) -> Result<()> {
     info!("Starting HTTP server on {}:{}", config.host, config.port);
 
     // Initialize managers
+    let logs_dir = config.logs_dir.clone();
     let process_manager = Arc::new(ProcessManager::new(
         config.auto_restart,
         config.max_restart_attempts,
+        logs_dir.clone(),
     ));
     
     let docker_manager = Arc::new(
         DockerManager::new().await.context("Failed to initialize Docker manager")?
     );
     
-    let logs_dir = config.logs_dir.clone();
     let log_manager = Arc::new(
         LogManager::new(logs_dir).context("Failed to initialize log manager")?
     );
@@ -118,41 +120,127 @@ pub async fn start_server(config: Config) -> Result<()> {
 }
 
 async fn list_services(State(state): State<AppState>) -> Json<Vec<Service>> {
-    let services = state.services.read().await;
-    Json(services.clone())
+    debug!("[DEBUG] list_services called - syncing status from process_manager");
+    
+    let mut services = state.services.read().await.clone();
+    
+    // Merge status from process_manager into services
+    for service in &mut services {
+        if let Some(actual_status) = state.process_manager.get_service_status(&service.id).await {
+            debug!("[DEBUG] Syncing status for service {}: {:?} -> {:?}", 
+                service.id, service.status, actual_status);
+            service.status = actual_status;
+            
+            // Also sync other fields from process_manager if available
+            if let Some(process_info) = state.process_manager.get_process_info(&service.id).await {
+                // Update restart_count if available in the managed process
+                // Note: We can't directly access restart_count from process_info,
+                // but we can keep the status sync which is the main issue
+            }
+        } else {
+            debug!("[DEBUG] No process_manager status for service {}, keeping original status: {:?}", 
+                service.id, service.status);
+        }
+    }
+    
+    debug!("[DEBUG] list_services returning {} services", services.len());
+    Json(services)
 }
 
 async fn start_service(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
+    debug!("Received start request for service: {}", id);
+    
     let services = state.services.read().await;
     let service = services.iter().find(|s| s.id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .ok_or_else(|| {
+            debug!("Service not found: {}", id);
+            StatusCode::NOT_FOUND
+        })?;
+    
+    debug!("Service found - id: {}, name: {}, command: '{}', working_dir: '{}', env vars: {:?}", 
+        service.id, service.name, service.command, service.working_dir, service.environment);
     
     let service_clone = service.clone();
     drop(services);
 
-    state.process_manager.start_service(service_clone).await
-        .map_err(|e| {
+    debug!("Calling process_manager.start_service for: {}", id);
+    let result = state.process_manager.start_service(service_clone).await;
+    
+    match &result {
+        Ok(_) => {
+            debug!("Successfully started service: {}", id);
+            debug!("[DEBUG] Updating state.services status for service: {}", id);
+            
+            // Get status from process_manager first (before acquiring write lock)
+            let actual_status = state.process_manager.get_service_status(&id).await;
+            
+            // Update status in state.services
+            let mut services = state.services.write().await;
+            if let Some(service) = services.iter_mut().find(|s| s.id == id) {
+                if let Some(status) = actual_status {
+                    debug!("[DEBUG] Updating service {} status from {:?} to {:?}", 
+                        id, service.status, status);
+                    service.status = status;
+                    service.updated_at = Utc::now();
+                } else {
+                    debug!("[DEBUG] Could not get status from process_manager for service: {}", id);
+                    // Set to Running as fallback since start was successful
+                    service.status = crate::models::ServiceStatus::Running;
+                    service.updated_at = Utc::now();
+                }
+            } else {
+                debug!("[DEBUG] Service {} not found in state.services to update", id);
+            }
+        }
+        Err(e) => {
             error!("Failed to start service: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+            debug!("Error details for service {}: {:?}", id, e);
+        }
+    }
 
-    Ok(StatusCode::OK)
+    result
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map(|_| StatusCode::OK)
 }
 
 async fn stop_service(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    state.process_manager.stop_service(&id).await
+    debug!("[DEBUG] Received stop request for service: {}", id);
+    
+    let result = state.process_manager.stop_service(&id).await;
+    
+    match &result {
+        Ok(_) => {
+            debug!("[DEBUG] Successfully stopped service: {}", id);
+            debug!("[DEBUG] Updating state.services status for service: {}", id);
+            
+            // Update status in state.services
+            let mut services = state.services.write().await;
+            if let Some(service) = services.iter_mut().find(|s| s.id == id) {
+                debug!("[DEBUG] Updating service {} status to Stopped", id);
+                service.status = crate::models::ServiceStatus::Stopped;
+                service.updated_at = Utc::now();
+            } else {
+                debug!("[DEBUG] Service {} not found in state.services to update", id);
+            }
+        }
+        Err(e) => {
+            error!("Failed to stop service: {}", e);
+            debug!("[DEBUG] Error details for service {}: {:?}", id, e);
+        }
+    }
+    
+    result
         .map_err(|e| {
             error!("Failed to stop service: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    Ok(StatusCode::OK)
+        })
+        .map(|_| StatusCode::OK)
 }
 
 async fn restart_service(

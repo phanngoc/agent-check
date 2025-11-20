@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Process Manager Panel</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 Process Manager Panel</h1>
+            <div class="header-actions">
+                <button id="refreshBtn" class="btn btn-secondary">🔄 Refresh</button>
+                <div class="system-metrics" id="systemMetrics"></div>
+            </div>
+        </header>
+
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="services">Services</button>
+            <button class="tab-btn" data-tab="containers">Docker Containers</button>
+        </div>
+
+        <!-- Services Tab -->
+        <div id="servicesTab" class="tab-content active">
+            <div class="services-grid" id="servicesGrid"></div>
+        </div>
+
+        <!-- Containers Tab -->
+        <div id="containersTab" class="tab-content">
+            <div class="containers-grid" id="containersGrid"></div>
+        </div>
+    </div>
+
+    <!-- Log Viewer Modal -->
+    <div id="logModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="logModalTitle">Logs</h2>
+                <button class="close-btn" onclick="closeLogModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="logContent" class="log-content"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
+

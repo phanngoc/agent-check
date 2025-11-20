@@ -43,7 +43,7 @@
     <script>
         // Initialize tracker
         window.UserTracker.init({
-            apiUrl: 'http://localhost:8085/api/v1',
+            apiUrl: '{{ config('tracker.api_url') }}',
             userId: null,
             captureScreenshots: true,
             screenshotQuality: 0.8,

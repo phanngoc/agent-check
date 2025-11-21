@@ -6,6 +6,7 @@ mod models;
 mod process_manager;
 mod server;
 mod service_detector;
+mod state_persistence;
 
 use anyhow::Result;
 use crate::config::Config;

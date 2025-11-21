@@ -18,8 +18,21 @@
                 <a href="{{ route('posts.index') }}" class="text-2xl font-bold hover:text-purple-200 transition">
                     📝 Blog Demo
                 </a>
-                <div class="space-x-4">
+                <div class="flex items-center space-x-4">
                     <a href="{{ route('posts.index') }}" class="hover:text-purple-200 transition">Trang chủ</a>
+                    <span class="text-purple-200">|</span>
+                    @auth
+                        <span class="text-sm">Xin chào, <strong>{{ Auth::user()->full_name ?? Auth::user()->name }}</strong></span>
+                        <span class="text-purple-200">|</span>
+                        <form method="POST" action="{{ route('logout') }}" class="inline">
+                            @csrf
+                            <button type="submit" class="hover:text-purple-200 transition">Đăng xuất</button>
+                        </form>
+                    @else
+                        <a href="{{ route('login') }}" class="hover:text-purple-200 transition">Đăng nhập</a>
+                        <span class="text-purple-200">|</span>
+                        <a href="{{ route('register') }}" class="hover:text-purple-200 transition">Đăng ký</a>
+                    @endauth
                     <span class="text-purple-200">|</span>
                     <span class="text-sm opacity-75">User Tracking Demo</span>
                 </div>
@@ -28,6 +41,11 @@
     </nav>
 
     <main class="container mx-auto px-4 py-8">
+        @if (session('success'))
+            <div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4">
+                {{ session('success') }}
+            </div>
+        @endif
         @yield('content')
     </main>
 

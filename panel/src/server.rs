@@ -22,7 +22,7 @@ use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
 };
-use tracing::{info, error, debug};
+use tracing::{info, error, debug, warn};
 use futures::Stream;
 use chrono::Utc;
 
@@ -42,10 +42,12 @@ pub async fn start_server(config: Config) -> Result<()> {
 
     // Initialize managers
     let logs_dir = config.logs_dir.clone();
+    let state_file = config.state_file.clone();
     let process_manager = Arc::new(ProcessManager::new(
         config.auto_restart,
         config.max_restart_attempts,
         logs_dir.clone(),
+        state_file,
     ));
     
     let docker_manager = Arc::new(
@@ -74,6 +76,12 @@ pub async fn start_server(config: Config) -> Result<()> {
     // Register services with log manager
     for service in &detected_services {
         let _ = log_manager.register_service(service.id.clone()).await;
+    }
+
+    // Recover processes from state file
+    info!("Recovering processes from previous session...");
+    if let Err(e) = process_manager.recover_processes(detected_services.clone()).await {
+        warn!("Failed to recover processes: {}", e);
     }
 
     let services = Arc::new(RwLock::new(detected_services));

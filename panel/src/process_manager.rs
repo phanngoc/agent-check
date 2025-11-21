@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use crate::models::{ProcessInfo, Service, ServiceStatus};
+use crate::state_persistence::{StatePersistence, ServiceState};
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -13,6 +14,7 @@ pub struct ProcessManager {
     auto_restart: bool,
     max_restart_attempts: u32,
     logs_dir: std::path::PathBuf,
+    state_persistence: StatePersistence,
 }
 
 struct ManagedProcess {
@@ -24,12 +26,18 @@ struct ManagedProcess {
 }
 
 impl ProcessManager {
-    pub fn new(auto_restart: bool, max_restart_attempts: u32, logs_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        auto_restart: bool,
+        max_restart_attempts: u32,
+        logs_dir: std::path::PathBuf,
+        state_file: std::path::PathBuf,
+    ) -> Self {
         Self {
             processes: Arc::new(RwLock::new(HashMap::new())),
             auto_restart,
             max_restart_attempts,
             logs_dir,
+            state_persistence: StatePersistence::new(state_file),
         }
     }
 
@@ -196,6 +204,19 @@ impl ProcessManager {
 
         self.processes.write().await.insert(service_id.clone(), managed);
 
+        // Save state to file
+        let service_state = ServiceState {
+            service_id: service_id.clone(),
+            pid,
+            started_at: Utc::now(),
+            command: service.command.clone(),
+            working_dir: service.working_dir.clone(),
+            environment: service.environment.clone(),
+        };
+        if let Err(e) = self.state_persistence.add_or_update_service(service_state).await {
+            warn!("Failed to save state for service {}: {}", service_id, e);
+        }
+
         // Start monitoring task
         let processes_clone = self.processes.clone();
         let auto_restart = self.auto_restart;
@@ -231,6 +252,11 @@ impl ProcessManager {
             }
         }
 
+        // Remove from state file
+        if let Err(e) = self.state_persistence.remove_service(service_id).await {
+            warn!("Failed to remove service {} from state: {}", service_id, e);
+        }
+
         Ok(())
     }
 
@@ -250,7 +276,29 @@ impl ProcessManager {
 
     pub async fn get_service_status(&self, service_id: &str) -> Option<ServiceStatus> {
         let processes = self.processes.read().await;
-        processes.get(service_id).map(|p| p.service.status.clone())
+        let managed = processes.get(service_id)?;
+        
+        // If process has no Child handle (recovered process), check if it's still alive
+        if managed.child.is_none() {
+            if let Some(pid) = managed.pid {
+                let mut system = sysinfo::System::new();
+                system.refresh_processes();
+                if system.process(sysinfo::Pid::from(pid as usize)).is_none() {
+                    // Process is dead, update status
+                    drop(processes);
+                    let mut processes = self.processes.write().await;
+                    if let Some(managed) = processes.get_mut(service_id) {
+                        managed.service.status = ServiceStatus::Stopped;
+                        managed.service.updated_at = Utc::now();
+                    }
+                    // Remove from state
+                    let _ = self.state_persistence.remove_service(service_id).await;
+                    return Some(ServiceStatus::Stopped);
+                }
+            }
+        }
+        
+        Some(managed.service.status.clone())
     }
 
     #[allow(dead_code)]
@@ -400,6 +448,135 @@ impl ProcessManager {
                     }
                 }
             } else {
+                break;
+            }
+        }
+    }
+
+    pub async fn recover_processes(&self, services: Vec<Service>) -> Result<()> {
+        info!("Recovering processes from state file...");
+        
+        let saved_states = self.state_persistence.load_state().await?;
+        
+        if saved_states.is_empty() {
+            info!("No saved processes to recover");
+            return Ok(());
+        }
+
+        info!("Found {} saved processes to check", saved_states.len());
+
+        // Create a map of service_id -> Service for quick lookup
+        let services_map: HashMap<String, Service> = services
+            .into_iter()
+            .map(|s| (s.id.clone(), s))
+            .collect();
+
+        // Check each saved process
+        let mut system = sysinfo::System::new();
+        system.refresh_processes();
+
+        for saved_state in saved_states {
+            let service_id = saved_state.service_id.clone();
+            let pid = saved_state.pid;
+
+            // Check if process is still alive
+            let is_alive = system.process(sysinfo::Pid::from(pid as usize)).is_some();
+
+            if is_alive {
+                info!("Process {} (PID: {}) is still running, recovering...", service_id, pid);
+                
+                // Find the service in the detected services
+                if let Some(mut service) = services_map.get(&service_id).cloned() {
+                    service.status = ServiceStatus::Running;
+                    service.updated_at = Utc::now();
+
+                    // We can't actually "attach" to an existing process in Rust
+                    // Instead, we'll create a ManagedProcess entry without a Child handle
+                    // The process will continue running, but we won't be able to monitor it directly
+                    // We'll track it by PID only
+                    let managed = ManagedProcess {
+                        child: None, // Can't attach to existing process
+                        service: service.clone(),
+                        start_time: Some(Instant::now()), // Approximate
+                        restart_count: 0,
+                        pid: Some(pid),
+                    };
+
+                    self.processes.write().await.insert(service_id.clone(), managed);
+
+                    // Update state file with current timestamp
+                    let updated_state = ServiceState {
+                        service_id: service_id.clone(),
+                        pid,
+                        started_at: saved_state.started_at, // Keep original start time
+                        command: saved_state.command.clone(),
+                        working_dir: saved_state.working_dir.clone(),
+                        environment: saved_state.environment.clone(),
+                    };
+                    
+                    if let Err(e) = self.state_persistence.add_or_update_service(updated_state).await {
+                        warn!("Failed to update state for recovered service {}: {}", service_id, e);
+                    }
+
+                    // Start monitoring task for recovered process (monitor by PID since no Child handle)
+                    let processes_clone = self.processes.clone();
+                    let state_persistence_clone = self.state_persistence.clone();
+                    let service_id_clone = service_id.clone();
+                    
+                    tokio::spawn(async move {
+                        Self::monitor_recovered_process(
+                            service_id_clone,
+                            pid,
+                            processes_clone,
+                            state_persistence_clone,
+                        ).await;
+                    });
+
+                    info!("Successfully recovered process {} (PID: {})", service_id, pid);
+                } else {
+                    warn!("Service {} not found in detected services, marking as stopped", service_id);
+                    // Remove from state since service is no longer detected
+                    let _ = self.state_persistence.remove_service(&service_id).await;
+                }
+            } else {
+                warn!("Process {} (PID: {}) is no longer running, marking as stopped", service_id, pid);
+                // Remove from state since process is dead
+                let _ = self.state_persistence.remove_service(&service_id).await;
+            }
+        }
+
+        info!("Process recovery completed");
+        Ok(())
+    }
+
+    async fn monitor_recovered_process(
+        service_id: String,
+        pid: u32,
+        processes: Arc<RwLock<HashMap<String, ManagedProcess>>>,
+        state_persistence: StatePersistence,
+    ) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            let mut processes_guard = processes.write().await;
+            let managed = match processes_guard.get_mut(&service_id) {
+                Some(m) => m,
+                None => break, // Service was stopped
+            };
+
+            // Check if process is still alive by PID
+            let mut system = sysinfo::System::new();
+            system.refresh_processes();
+            
+            if system.process(sysinfo::Pid::from(pid as usize)).is_none() {
+                // Process is dead
+                warn!("Recovered process {} (PID: {}) is no longer running", service_id, pid);
+                managed.service.status = ServiceStatus::Stopped;
+                managed.service.updated_at = Utc::now();
+                drop(processes_guard);
+                
+                // Remove from state
+                let _ = state_persistence.remove_service(&service_id).await;
                 break;
             }
         }

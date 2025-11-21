@@ -56,14 +56,26 @@
 
         <div id="commentsSection" class="hidden mt-4">
             <h3 class="font-bold text-lg mb-3">Comments</h3>
-            <form id="commentForm" class="space-y-3">
-                <textarea name="comment" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500" placeholder="Viết bình luận..."></textarea>
-                <button type="submit" class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 transition">
-                    Gửi bình luận
-                </button>
-            </form>
+            
+            @auth
+                <form id="commentForm" class="space-y-3">
+                    @csrf
+                    <textarea name="content" id="commentContent" rows="3" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-purple-500" placeholder="Viết bình luận..."></textarea>
+                    <button type="submit" class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 transition">
+                        Gửi bình luận
+                    </button>
+                </form>
+            @else
+                <div class="bg-yellow-50 border border-yellow-200 rounded-md p-4 mb-4">
+                    <p class="text-yellow-800 mb-2">Vui lòng đăng nhập để bình luận</p>
+                    <a href="{{ route('login') }}" class="text-purple-600 hover:text-purple-800 font-medium">Đăng nhập</a>
+                    <span class="text-gray-400 mx-2">|</span>
+                    <a href="{{ route('register') }}" class="text-purple-600 hover:text-purple-800 font-medium">Đăng ký</a>
+                </div>
+            @endauth
+            
             <div id="commentsList" class="mt-4 space-y-3">
-                <p class="text-gray-500 text-sm">Chưa có bình luận nào. Hãy là người đầu tiên!</p>
+                <p class="text-gray-500 text-sm">Đang tải bình luận...</p>
             </div>
         </div>
     </div>
@@ -99,10 +111,13 @@
 <script>
 let likeCount = 0;
 
-function showToast(message) {
+function showToast(message, type = 'success') {
     const toast = document.getElementById('toast');
     const toastMessage = document.getElementById('toastMessage');
     toastMessage.textContent = message;
+    toast.className = `fixed bottom-4 right-4 px-6 py-3 rounded-lg shadow-lg z-50 ${
+        type === 'error' ? 'bg-red-500' : 'bg-green-500'
+    } text-white`;
     toast.classList.remove('hidden');
     setTimeout(() => {
         toast.classList.add('hidden');
@@ -123,27 +138,97 @@ function handleBookmark() {
     showToast('Bài viết đã được bookmark!');
 }
 
+const postSlug = '{{ $post->slug }}';
+
 function showComments() {
     const section = document.getElementById('commentsSection');
+    const isHidden = section.classList.contains('hidden');
     section.classList.toggle('hidden');
+    
+    if (isHidden) {
+        loadComments();
+    }
 }
 
-document.getElementById('commentForm').addEventListener('submit', function(e) {
-    e.preventDefault();
-    const comment = this.comment.value;
-    if (comment.trim()) {
-        const commentsList = document.getElementById('commentsList');
-        if (commentsList.querySelector('p')) {
-            commentsList.innerHTML = '';
+function loadComments() {
+    fetch(`/posts/${postSlug}/comments`)
+        .then(response => response.json())
+        .then(data => {
+            const commentsList = document.getElementById('commentsList');
+            
+            if (data.success && data.comments.length > 0) {
+                commentsList.innerHTML = '';
+                data.comments.forEach(comment => {
+                    const commentDiv = document.createElement('div');
+                    commentDiv.className = 'bg-gray-100 p-3 rounded';
+                    commentDiv.innerHTML = `
+                        <div class="flex items-start justify-between">
+                            <div class="flex-1">
+                                <p class="text-gray-700">${escapeHtml(comment.content)}</p>
+                                <div class="mt-2 flex items-center gap-2 text-xs text-gray-500">
+                                    <span class="font-semibold text-purple-600">${escapeHtml(comment.user_name)}</span>
+                                    <span>•</span>
+                                    <span>${comment.created_at_human}</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    commentsList.appendChild(commentDiv);
+                });
+            } else {
+                commentsList.innerHTML = '<p class="text-gray-500 text-sm">Chưa có bình luận nào. Hãy là người đầu tiên!</p>';
+            }
+        })
+        .catch(error => {
+            console.error('Error loading comments:', error);
+            document.getElementById('commentsList').innerHTML = '<p class="text-red-500 text-sm">Lỗi khi tải bình luận. Vui lòng thử lại.</p>';
+        });
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+const commentForm = document.getElementById('commentForm');
+if (commentForm) {
+    commentForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        const content = document.getElementById('commentContent').value.trim();
+        
+        if (!content) {
+            showToast('Vui lòng nhập nội dung bình luận!', 'error');
+            return;
         }
-        const commentDiv = document.createElement('div');
-        commentDiv.className = 'bg-gray-100 p-3 rounded';
-        commentDiv.innerHTML = `<p class="text-gray-700">${comment}</p><p class="text-xs text-gray-500 mt-1">Vừa xong</p>`;
-        commentsList.appendChild(commentDiv);
-        this.reset();
-        showToast('Bình luận đã được gửi!');
-    }
-});
+        
+        const formData = new FormData();
+        formData.append('content', content);
+        formData.append('_token', '{{ csrf_token() }}');
+        
+        fetch(`/posts/${postSlug}/comments`, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                document.getElementById('commentContent').value = '';
+                loadComments();
+                showToast('Bình luận đã được gửi!');
+            } else {
+                showToast('Có lỗi xảy ra. Vui lòng thử lại!', 'error');
+            }
+        })
+        .catch(error => {
+            console.error('Error submitting comment:', error);
+            showToast('Có lỗi xảy ra. Vui lòng thử lại!', 'error');
+        });
+    });
+}
 </script>
 @endsection
 

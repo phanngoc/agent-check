@@ -6,6 +6,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
+use tokio::process::Command as TokioCommand;
 use chrono::Utc;
 use tracing::{info, warn, error, debug};
 
@@ -46,6 +47,14 @@ impl ProcessManager {
         
         info!("Starting service: {}", service_id);
         debug!("[DEBUG] start_service called for service_id: {}", service_id);
+
+        // Kiểm tra và kill process đang sử dụng port nếu có
+        if let Some(port) = service.port {
+            info!("Checking if port {} is in use...", port);
+            if let Err(e) = Self::kill_process_by_port(port).await {
+                warn!("Failed to kill process on port {}: {}. Continuing anyway...", port, e);
+            }
+        }
 
         // Log file path - use absolute path from logs_dir
         let log_path = self.logs_dir.join(format!("{}.log", service_id));
@@ -580,6 +589,77 @@ impl ProcessManager {
                 break;
             }
         }
+    }
+
+    // Helper function để kiểm tra port có đang được sử dụng không
+    async fn check_port_in_use(port: u16) -> Result<Option<u32>> {
+        // Sử dụng lsof để tìm PID
+        let output = TokioCommand::new("lsof")
+            .arg("-ti")
+            .arg(format!(":{}", port))
+            .output()
+            .await;
+        
+        match output {
+            Ok(output) if output.status.success() => {
+                let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !pid_str.is_empty() {
+                    // lsof có thể trả về nhiều PIDs, lấy PID đầu tiên
+                    if let Some(first_pid) = pid_str.lines().next() {
+                        if let Ok(pid) = first_pid.trim().parse::<u32>() {
+                            return Ok(Some(pid));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None)
+        }
+    }
+
+    // Kill process đang sử dụng port
+    async fn kill_process_by_port(port: u16) -> Result<()> {
+        if let Some(pid) = Self::check_port_in_use(port).await? {
+            info!("Port {} is in use by process PID: {}", port, pid);
+            
+            // Thử graceful kill trước
+            info!("Attempting graceful kill (SIGTERM) for PID: {}", pid);
+            let _ = TokioCommand::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .output()
+                .await;
+            
+            // Đợi 2 giây
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            
+            // Kiểm tra xem process còn sống không
+            if Self::check_port_in_use(port).await?.is_some() {
+                warn!("Process {} still alive after SIGTERM, force killing...", pid);
+                // Force kill
+                let output = TokioCommand::new("kill")
+                    .arg("-9")
+                    .arg(pid.to_string())
+                    .output()
+                    .await
+                    .context("Failed to force kill process")?;
+                
+                if !output.status.success() {
+                    warn!("Failed to force kill process {}: {:?}", pid, output);
+                } else {
+                    info!("Successfully force killed process {}", pid);
+                }
+            } else {
+                info!("Process {} terminated gracefully", pid);
+            }
+            
+            // Đợi thêm một chút để port được giải phóng
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        } else {
+            debug!("Port {} is not in use", port);
+        }
+        
+        Ok(())
     }
 }
 

@@ -7,28 +7,53 @@ export function useServiceLogs(serviceId: () => string | null) {
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [eventSource, setEventSource] = createSignal<EventSource | null>(null);
+  let abortController: AbortController | null = null;
 
   const loadLogs = async (params?: api.GetServiceLogsParams) => {
     const id = serviceId();
     if (!id) return;
     
+    // Cancel previous request if it exists
+    if (abortController) {
+      abortController.abort();
+    }
+
+    // Create new AbortController for this request
+    abortController = new AbortController();
+    const currentController = abortController;
+    
     try {
       setLoading(true);
       setError(null);
-      const data = await api.getServiceLogs(id, params);
+      const data = await api.getServiceLogs(id, params, currentController.signal);
       
-      if (Array.isArray(data)) {
-        // Old format - string array
-        setLogs([]);
-      } else {
-        // New format - FilteredLogsResponse
-        setLogs(data.logs);
+      // Only update state if this request wasn't cancelled
+      if (!currentController.signal.aborted) {
+        if (Array.isArray(data)) {
+          // Old format - string array
+          setLogs([]);
+        } else {
+          // New format - FilteredLogsResponse
+          setLogs(data.logs);
+        }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load logs");
-      console.error("Error loading logs:", e);
+      // Don't set error for aborted requests
+      if (e instanceof Error && e.name === "AbortError") {
+        return;
+      }
+      
+      // Only update error state if this is still the current request
+      if (currentController === abortController) {
+        setError(e instanceof Error ? e.message : "Failed to load logs");
+        console.error("Error loading logs:", e);
+      }
     } finally {
-      setLoading(false);
+      // Only update loading state if this is still the current request
+      if (currentController === abortController) {
+        setLoading(false);
+        abortController = null;
+      }
     }
   };
 
@@ -77,6 +102,11 @@ export function useServiceLogs(serviceId: () => string | null) {
 
   onCleanup(() => {
     stopStreaming();
+    // Cancel any pending request on cleanup
+    if (abortController) {
+      abortController.abort();
+      abortController = null;
+    }
   });
 
   return {
@@ -95,18 +125,44 @@ export function useCombinedLogs() {
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [eventSource, setEventSource] = createSignal<EventSource | null>(null);
+  let abortController: AbortController | null = null;
 
   const loadLogs = async (params?: api.GetCombinedLogsParams) => {
+    // Cancel previous request if it exists
+    if (abortController) {
+      abortController.abort();
+    }
+
+    // Create new AbortController for this request
+    abortController = new AbortController();
+    const currentController = abortController;
+
     try {
       setLoading(true);
       setError(null);
-      const data = await api.getCombinedLogs(params);
-      setLogs(data);
+      const data = await api.getCombinedLogs(params, currentController.signal);
+      
+      // Only update state if this request wasn't cancelled
+      if (!currentController.signal.aborted) {
+        setLogs(data);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load combined logs");
+      // Don't set error for aborted requests
+      if (e instanceof Error && e.name === "AbortError") {
+        return;
+      }
+      
+      const errorMessage = e instanceof Error 
+        ? e.message 
+        : "Failed to load combined logs";
+      setError(errorMessage);
       console.error("Error loading combined logs:", e);
     } finally {
-      setLoading(false);
+      // Only update loading state if this is still the current request
+      if (currentController === abortController) {
+        setLoading(false);
+        abortController = null;
+      }
     }
   };
 
@@ -149,6 +205,11 @@ export function useCombinedLogs() {
 
   onCleanup(() => {
     stopStreaming();
+    // Cancel any pending request on cleanup
+    if (abortController) {
+      abortController.abort();
+      abortController = null;
+    }
   });
 
   return {

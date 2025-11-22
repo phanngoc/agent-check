@@ -1,10 +1,12 @@
-import { Component, For, createSignal, onCleanup, createEffect } from "solid-js";
+import { Component, For, createSignal, onCleanup, createEffect, onMount } from "solid-js";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { useServiceLogs } from "@/stores/logs";
 import { cn } from "@/lib/utils";
+import flatpickr from "flatpickr";
+import "flatpickr/dist/flatpickr.min.css";
 
 export interface LogViewerProps {
   serviceId: string | null;
@@ -34,10 +36,19 @@ export const LogViewer: Component<LogViewerProps> = (props) => {
   );
 
   let logsContainer: HTMLDivElement | undefined;
+  let fromInputRef: HTMLInputElement | undefined;
+  let toInputRef: HTMLInputElement | undefined;
+  let fromPicker: flatpickr.Instance | null = null;
+  let toPicker: flatpickr.Instance | null = null;
+  let previousServiceId: string | null = null;
+  let isInitialMount = true;
 
   const applyFilter = async () => {
     const id = props.serviceId;
     if (!id) return;
+    
+    // Prevent calling if already loading
+    if (loading()) return;
 
     const params: any = {
       limit: limit(),
@@ -45,8 +56,14 @@ export const LogViewer: Component<LogViewerProps> = (props) => {
     };
 
     if (level() !== "all") params.level = level();
-    if (from()) params.from = new Date(from()).toISOString();
-    if (to()) params.to = new Date(to()).toISOString();
+    if (from()) {
+      // from() is already ISO string from Flatpickr onChange
+      params.from = from();
+    }
+    if (to()) {
+      // to() is already ISO string from Flatpickr onChange
+      params.to = to();
+    }
     if (search()) params.search = search();
 
     await loadLogs(params);
@@ -59,6 +76,13 @@ export const LogViewer: Component<LogViewerProps> = (props) => {
     setTo("");
     setOperator("and");
     setLimit(1000);
+    // Clear Flatpickr instances
+    if (fromPicker) {
+      fromPicker.clear();
+    }
+    if (toPicker) {
+      toPicker.clear();
+    }
     applyFilter();
   };
 
@@ -68,13 +92,69 @@ export const LogViewer: Component<LogViewerProps> = (props) => {
     }
   };
 
-  createEffect(() => {
+  // Only load logs when component is first mounted and serviceId is available
+  onMount(() => {
     const id = props.serviceId;
     if (id) {
       applyFilter();
       startStreaming();
-    } else {
-      stopStreaming();
+      previousServiceId = id;
+    }
+    isInitialMount = false;
+
+    // Initialize Flatpickr instances after DOM is ready
+    setTimeout(() => {
+      if (fromInputRef) {
+        fromPicker = flatpickr(fromInputRef, {
+          enableTime: true,
+          dateFormat: "d/m/Y, H:i",
+          time_24hr: true,
+        onChange: (selectedDates: Date[]) => {
+          if (selectedDates.length > 0) {
+            setFrom(selectedDates[0].toISOString());
+          } else {
+            setFrom("");
+          }
+        },
+        });
+      }
+
+      if (toInputRef) {
+        toPicker = flatpickr(toInputRef, {
+          enableTime: true,
+          dateFormat: "d/m/Y, H:i",
+          time_24hr: true,
+        onChange: (selectedDates: Date[]) => {
+          if (selectedDates.length > 0) {
+            setTo(selectedDates[0].toISOString());
+          } else {
+            setTo("");
+          }
+        },
+        });
+      }
+    }, 0);
+  });
+
+  // Track serviceId changes - only call API when serviceId actually changes
+  createEffect(() => {
+    const currentServiceId = props.serviceId;
+    
+    // Skip on initial mount (handled by onMount)
+    if (isInitialMount) {
+      previousServiceId = currentServiceId;
+      return;
+    }
+
+    // Only trigger when serviceId actually changes
+    if (previousServiceId !== currentServiceId) {
+      if (currentServiceId) {
+        applyFilter();
+        startStreaming();
+      } else {
+        stopStreaming();
+      }
+      previousServiceId = currentServiceId;
     }
   });
 
@@ -84,6 +164,15 @@ export const LogViewer: Component<LogViewerProps> = (props) => {
 
   onCleanup(() => {
     stopStreaming();
+    // Destroy Flatpickr instances
+    if (fromPicker) {
+      fromPicker.destroy();
+      fromPicker = null;
+    }
+    if (toPicker) {
+      toPicker.destroy();
+      toPicker = null;
+    }
   });
 
   const filteredLogs = () => {
@@ -137,18 +226,22 @@ export const LogViewer: Component<LogViewerProps> = (props) => {
             </div>
             <div>
               <label class="text-sm text-muted-foreground mb-1 block">From:</label>
-              <Input
-                type="datetime-local"
-                value={from()}
-                onInput={(e) => setFrom(e.currentTarget.value)}
+              <input
+                ref={fromInputRef}
+                type="text"
+                placeholder="dd/mm/yyyy, --:--"
+                class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                data-input
               />
             </div>
             <div>
               <label class="text-sm text-muted-foreground mb-1 block">To:</label>
-              <Input
-                type="datetime-local"
-                value={to()}
-                onInput={(e) => setTo(e.currentTarget.value)}
+              <input
+                ref={toInputRef}
+                type="text"
+                placeholder="dd/mm/yyyy, --:--"
+                class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                data-input
               />
             </div>
           </div>

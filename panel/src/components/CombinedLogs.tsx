@@ -1,4 +1,4 @@
-import { Component, For, createSignal, onCleanup, createEffect, Show } from "solid-js";
+import { Component, For, createSignal, onCleanup, createEffect, Show, onMount } from "solid-js";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +26,9 @@ export const CombinedLogs: Component = () => {
   const { services } = useServices();
 
   let logsContainer: HTMLDivElement | undefined;
+  let debounceTimer: number | null = null;
+  let previousCollapsed: boolean | null = null;
+  let isInitialMount = true;
 
   const getServiceName = (serviceId: string): string => {
     const serviceList = services();
@@ -40,9 +43,25 @@ export const CombinedLogs: Component = () => {
     await loadLogs(params);
   };
 
+  // Debounced version of applyFilter
+  const debouncedApplyFilter = () => {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+    }
+    debounceTimer = window.setTimeout(() => {
+      applyFilter();
+      debounceTimer = null;
+    }, 300); // 300ms debounce
+  };
+
   const clearFilter = () => {
     setLevel("all");
     setSearch("");
+    // Clear debounce and apply immediately
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
     applyFilter();
   };
 
@@ -52,13 +71,35 @@ export const CombinedLogs: Component = () => {
     }
   };
 
-  createEffect(() => {
+  // Only load logs when component is first mounted and not collapsed
+  onMount(() => {
     if (!collapsed()) {
       applyFilter();
       startStreaming();
-    } else {
+    }
+    isInitialMount = false;
+  });
+
+  // Track collapsed state changes - only call API when expanding (false -> true)
+  createEffect(() => {
+    const currentCollapsed = collapsed();
+    
+    // Skip on initial mount (handled by onMount)
+    if (isInitialMount) {
+      previousCollapsed = currentCollapsed;
+      return;
+    }
+
+    // Only trigger when expanding (was collapsed, now not collapsed)
+    if (previousCollapsed === true && currentCollapsed === false) {
+      applyFilter();
+      startStreaming();
+    } else if (currentCollapsed === true) {
+      // Stop streaming when collapsing
       stopStreaming();
     }
+
+    previousCollapsed = currentCollapsed;
   });
 
   createEffect(() => {
@@ -67,6 +108,11 @@ export const CombinedLogs: Component = () => {
 
   onCleanup(() => {
     stopStreaming();
+    // Clear any pending debounce timer
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
   });
 
   const filteredLogs = () => {
@@ -108,7 +154,15 @@ export const CombinedLogs: Component = () => {
               <label class="text-sm text-muted-foreground mb-1 block">Level:</label>
               <Select
                 value={level()}
-                onChange={(e) => setLevel(e.currentTarget.value)}
+                onChange={(e) => {
+                  setLevel(e.currentTarget.value);
+                  // Apply filter immediately for level changes (no debounce needed)
+                  if (debounceTimer !== null) {
+                    clearTimeout(debounceTimer);
+                    debounceTimer = null;
+                  }
+                  applyFilter();
+                }}
               >
                 <option value="all">All</option>
                 <option value="error">Error</option>
@@ -123,7 +177,11 @@ export const CombinedLogs: Component = () => {
                 type="text"
                 placeholder="Search in log messages..."
                 value={search()}
-                onInput={(e) => setSearch(e.currentTarget.value)}
+                onInput={(e) => {
+                  setSearch(e.currentTarget.value);
+                  // Debounce search input
+                  debouncedApplyFilter();
+                }}
               />
             </div>
           </div>

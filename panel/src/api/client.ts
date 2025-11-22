@@ -9,21 +9,94 @@ import type {
 } from "@/types";
 
 const API_BASE = "/api";
+const DEFAULT_TIMEOUT = 30000; // 30 seconds
 
-async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options);
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
-  }
-  return response.json();
+// Helper function to create a timeout promise
+function createTimeoutPromise(timeout: number): Promise<never> {
+  return new Promise((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`Request timeout after ${timeout}ms`));
+    }, timeout);
+  });
 }
 
-async function fetchText(url: string, options?: RequestInit): Promise<string[]> {
-  const response = await fetch(url, options);
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
+// Helper function to handle network errors
+function handleNetworkError(error: unknown): Error {
+  if (error instanceof TypeError && error.message.includes("Failed to fetch")) {
+    // Check for specific network errors
+    const errorMessage = error.message.toLowerCase();
+    if (errorMessage.includes("err_insufficient_resources") || 
+        errorMessage.includes("insufficient resources")) {
+      return new Error("Too many requests. Please wait a moment and try again.");
+    }
+    return new Error("Network error: Unable to connect to server. Please check your connection.");
   }
-  return response.json();
+  // Check if error is a DOMException with ERR_INSUFFICIENT_RESOURCES
+  if (error instanceof DOMException && error.name === "NetworkError") {
+    const errorMessage = error.message.toLowerCase();
+    if (errorMessage.includes("err_insufficient_resources") || 
+        errorMessage.includes("insufficient resources")) {
+      return new Error("Too many requests. Please wait a moment and try again.");
+    }
+  }
+  // Check error message for ERR_INSUFFICIENT_RESOURCES (may appear in console logs)
+  if (error instanceof Error) {
+    const errorMessage = error.message.toLowerCase();
+    if (errorMessage.includes("err_insufficient_resources") || 
+        errorMessage.includes("insufficient resources")) {
+      return new Error("Too many requests. Please wait a moment and try again.");
+    }
+    return error;
+  }
+  return new Error("Unknown error occurred");
+}
+
+async function fetchWithTimeout(
+  url: string,
+  options?: RequestInit,
+  timeout: number = DEFAULT_TIMEOUT
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await Promise.race([
+      fetch(url, { ...options, signal: controller.signal }),
+      createTimeoutPromise(timeout),
+    ]);
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Request timeout after ${timeout}ms`);
+    }
+    throw handleNetworkError(error);
+  }
+}
+
+async function fetchJson<T>(url: string, options?: RequestInit, timeout?: number): Promise<T> {
+  try {
+    const response = await fetchWithTimeout(url, options, timeout);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return response.json();
+  } catch (error) {
+    throw handleNetworkError(error);
+  }
+}
+
+async function fetchText(url: string, options?: RequestInit, timeout?: number): Promise<string[]> {
+  try {
+    const response = await fetchWithTimeout(url, options, timeout);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return response.json();
+  } catch (error) {
+    throw handleNetworkError(error);
+  }
 }
 
 // Services
@@ -67,7 +140,8 @@ export interface GetServiceLogsParams {
 
 export async function getServiceLogs(
   id: string,
-  params?: GetServiceLogsParams
+  params?: GetServiceLogsParams,
+  signal?: AbortSignal
 ): Promise<FilteredLogsResponse | string[]> {
   const searchParams = new URLSearchParams();
   if (params?.level) searchParams.append("level", params.level);
@@ -80,11 +154,16 @@ export async function getServiceLogs(
 
   const url = `${API_BASE}/services/${id}/logs${searchParams.toString() ? `?${searchParams.toString()}` : ""}`;
   
+  const options: RequestInit = {};
+  if (signal) {
+    options.signal = signal;
+  }
+  
   // If we have filter params, expect FilteredLogsResponse, otherwise string[]
   if (params && (params.level || params.from || params.to || params.search)) {
-    return fetchJson<FilteredLogsResponse>(url);
+    return fetchJson<FilteredLogsResponse>(url, options);
   }
-  return fetchText(url);
+  return fetchText(url, options);
 }
 
 export function streamServiceLogs(
@@ -147,7 +226,8 @@ export interface GetCombinedLogsParams {
 }
 
 export async function getCombinedLogs(
-  params?: GetCombinedLogsParams
+  params?: GetCombinedLogsParams,
+  signal?: AbortSignal
 ): Promise<LogEntry[]> {
   const searchParams = new URLSearchParams();
   if (params?.level) searchParams.append("level", params.level);
@@ -155,12 +235,21 @@ export async function getCombinedLogs(
   if (params?.lines) searchParams.append("lines", params.lines.toString());
 
   const url = `${API_BASE}/logs/combined${searchParams.toString() ? `?${searchParams.toString()}` : ""}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
+  
+  try {
+    const response = await fetchWithTimeout(url, { signal }, DEFAULT_TIMEOUT);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json();
+    return data.logs || [];
+  } catch (error) {
+    // Re-throw abort errors as-is (for cancellation)
+    if (error instanceof Error && error.name === "AbortError") {
+      throw error;
+    }
+    throw handleNetworkError(error);
   }
-  const data = await response.json();
-  return data.logs || [];
 }
 
 export function streamCombinedLogs(

@@ -8,6 +8,8 @@ const [error, setError] = createSignal<string | null>(null);
 const [metrics, setMetrics] = createSignal<Record<string, ServiceMetrics>>({});
 
 let refreshInterval: number | null = null;
+// Track service IDs that are currently loading metrics to prevent duplicate requests
+const pendingMetricsRequests = new Set<string>();
 
 export function useServices() {
   const loadServices = async () => {
@@ -17,14 +19,22 @@ export function useServices() {
       const data = await api.listServices();
       setServices(data);
       
-      // Load metrics for running services
+      // Load metrics for running services (using deduplication)
       const runningServices = data.filter(s => s.status === "running");
       for (const service of runningServices) {
+        // Skip if already loading metrics for this service
+        if (pendingMetricsRequests.has(service.id)) {
+          continue;
+        }
+        
+        pendingMetricsRequests.add(service.id);
         try {
           const serviceMetrics = await api.getServiceMetrics(service.id);
           setMetrics(prev => ({ ...prev, [service.id]: serviceMetrics }));
         } catch (e) {
           console.error(`Failed to load metrics for ${service.id}:`, e);
+        } finally {
+          pendingMetricsRequests.delete(service.id);
         }
       }
     } catch (e) {
@@ -66,11 +76,26 @@ export function useServices() {
   };
 
   const loadServiceMetrics = async (id: string) => {
+    // Prevent duplicate requests for the same service
+    if (pendingMetricsRequests.has(id)) {
+      return;
+    }
+
+    // Check if service is running before loading metrics
+    const serviceList = services();
+    const service = serviceList.find(s => s.id === id);
+    if (!service || service.status !== "running") {
+      return;
+    }
+
+    pendingMetricsRequests.add(id);
     try {
       const serviceMetrics = await api.getServiceMetrics(id);
       setMetrics(prev => ({ ...prev, [id]: serviceMetrics }));
     } catch (e) {
       console.error(`Failed to load metrics for ${id}:`, e);
+    } finally {
+      pendingMetricsRequests.delete(id);
     }
   };
 

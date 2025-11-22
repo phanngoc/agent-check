@@ -12,6 +12,8 @@ Panel quản lý process bằng Rust tương tự PM2, với Web UI để quản
 - ✅ Metrics (CPU, RAM, uptime)
 - ✅ Web UI hiện đại và responsive
 - ✅ Lưu lịch sử logs
+- ✅ SQLite database cho search và filtering logs
+- ✅ Auto cleanup logs cũ
 
 ## Cài đặt
 
@@ -19,6 +21,7 @@ Panel quản lý process bằng Rust tương tự PM2, với Web UI để quản
 
 - Rust 1.70+
 - Docker (để quản lý containers)
+- cargo-watch (cho development mode, optional)
 
 ### Build
 
@@ -46,6 +49,92 @@ cargo run
 ```
 
 Panel sẽ tự động phát hiện project root và các services.
+
+## Development
+
+### Chạy Development Mode với Hot Reload
+
+Sử dụng script `dev.sh` để chạy panel với auto-reload khi code thay đổi:
+
+```bash
+cd panel
+./dev.sh
+```
+
+Script này sử dụng `cargo-watch` để tự động rebuild và restart khi có thay đổi trong `src/` directory.
+
+**Lưu ý về Hot Reload Tools**:
+
+Script `dev.sh` sẽ tự động cài đặt `cargo-watch` nếu chưa có. Nếu gặp lỗi, có thể:
+
+1. **Cài thủ công với flags** (khuyến nghị cho Mac M1):
+```bash
+cargo install cargo-watch --no-default-features --features watchexec-notify
+```
+
+2. **Sử dụng watchexec thay thế**:
+```bash
+brew install watchexec
+# Script sẽ tự động dùng watchexec nếu cargo-watch không có
+```
+
+3. **Chạy không hot reload**:
+```bash
+cd panel
+cargo run
+# Tự restart khi cần
+```
+
+**Lưu ý**: `cargo-watch` đã deprecated trên Homebrew, nên cài từ crates.io thay vì Homebrew.
+
+### Chạy Development Mode thủ công
+
+Nếu không muốn dùng `cargo-watch`, có thể chạy thủ công:
+
+```bash
+cd panel
+cargo run
+```
+
+Hoặc sử dụng `cargo watch` trực tiếp (nếu đã cài):
+```bash
+cd panel
+cargo watch -x 'run' -w src -d 0.2 -c
+```
+
+### Các lệnh hữu ích cho Development
+
+```bash
+# Check code (không compile)
+cargo check
+
+# Build release
+cargo build --release
+
+# Run tests (nếu có)
+cargo test
+
+# Format code
+cargo fmt
+
+# Lint code
+cargo clippy
+```
+
+### Database Development
+
+SQLite database được lưu tại `panel/data/logs.db`. Có thể sử dụng SQLite CLI để query:
+
+```bash
+# Xem schema
+sqlite3 panel/data/logs.db ".schema"
+
+# Query logs
+sqlite3 panel/data/logs.db "SELECT * FROM logs LIMIT 10;"
+
+# Xem thống kê
+sqlite3 panel/data/logs.db "SELECT service_id, COUNT(*) FROM logs GROUP BY service_id;"
+```
 
 ## Services được phát hiện tự động
 
@@ -86,6 +175,11 @@ Panel tự động phát hiện containers từ `docker-compose.yml`:
 
 - `GET /api/system/metrics` - Get system metrics
 
+### Logs Management
+
+- `POST /api/logs/cleanup?days=30` - Cleanup logs older than specified days (default: 30)
+- `GET /api/logs/stats` - Get log statistics (total, by service, by level)
+
 ## Cấu trúc
 
 ```
@@ -97,6 +191,7 @@ panel/
 │   ├── docker_manager.rs    # Docker management
 │   ├── service_detector.rs  # Auto-detect services
 │   ├── log_manager.rs       # Log management
+│   ├── database.rs          # SQLite database for logs
 │   ├── metrics.rs           # Metrics collection
 │   ├── config.rs            # Configuration
 │   └── models.rs            # Data models
@@ -104,7 +199,10 @@ panel/
 │   ├── index.html
 │   ├── app.js
 │   └── styles.css
-└── logs/                    # Log files (gitignored)
+├── logs/                    # Log files (gitignored)
+├── data/                    # SQLite database (gitignored)
+│   └── logs.db
+└── dev.sh                   # Development script with hot reload
 ```
 
 ## Configuration
@@ -114,8 +212,19 @@ Mặc định:
 - Host: 0.0.0.0
 - Auto-restart: true
 - Max restart attempts: 5
+- Logs directory: `panel/logs/`
+- Data directory: `panel/data/` (SQLite database)
+- Log retention: 30 days (tự động cleanup)
 
 Có thể thay đổi trong `src/config.rs` hoặc thông qua environment variables (sẽ được thêm sau).
+
+### Log Storage
+
+Panel sử dụng dual storage cho logs:
+- **File text** (`logs/*.log`): Cho realtime streaming qua SSE
+- **SQLite database** (`data/logs.db`): Cho search và filtering hiệu quả
+
+Logs mới được ghi vào cả hai nơi. Khi start lần đầu, logs cũ từ file sẽ được tự động migrate vào database (background task).
 
 ## Developer Experience
 

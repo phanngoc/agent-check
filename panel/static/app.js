@@ -6,6 +6,9 @@ let logEventSources = {};
 let currentServiceId = null;
 let logEventSource = null;
 let metricsInterval = null;
+let combinedLogEventSource = null;
+let combinedLogs = [];
+let isCombinedLogsCollapsed = false;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
@@ -14,6 +17,8 @@ document.addEventListener('DOMContentLoaded', () => {
     loadServices();
     loadContainers();
     loadSystemMetrics();
+    loadCombinedLogs();
+    startCombinedLogStreaming();
     
     // Auto-refresh every 5 seconds
     setInterval(() => {
@@ -106,6 +111,11 @@ function navigateToHome() {
     loadServices();
     loadContainers();
     loadSystemMetrics();
+    
+    // Reload combined logs if not collapsed
+    if (!isCombinedLogsCollapsed) {
+        loadCombinedLogs();
+    }
 }
 
 // Tab switching
@@ -761,5 +771,174 @@ function startLogStreaming(serviceId) {
             console.error('Error parsing log entry:', e);
         }
     };
+}
+
+// Combined Logs Functions
+function getServiceName(serviceId) {
+    const service = services.find(s => s.id === serviceId);
+    return service ? service.name : serviceId;
+}
+
+async function loadCombinedLogs() {
+    try {
+        const level = document.getElementById('combinedLogsLevel').value;
+        const search = document.getElementById('combinedLogsSearch').value;
+        const params = new URLSearchParams();
+        if (level && level !== 'all') params.append('level', level);
+        if (search) params.append('search', search);
+        params.append('lines', '100');
+        
+        const response = await fetch(`${API_BASE}/logs/combined?${params.toString()}`);
+        if (!response.ok) {
+            throw new Error('Failed to load combined logs');
+        }
+        const data = await response.json();
+        combinedLogs = data.logs;
+        renderCombinedLogs();
+    } catch (error) {
+        console.error('Failed to load combined logs:', error);
+        const display = document.getElementById('combinedLogsDisplay');
+        if (display) {
+            display.textContent = `Error loading logs: ${error.message}`;
+        }
+    }
+}
+
+function renderCombinedLogs() {
+    const display = document.getElementById('combinedLogsDisplay');
+    if (!display) return;
+    
+    if (combinedLogs.length === 0) {
+        display.innerHTML = '<div class="empty-state">No logs available</div>';
+        return;
+    }
+    
+    display.innerHTML = combinedLogs.map(log => {
+        const timestamp = new Date(log.timestamp).toLocaleString();
+        const serviceName = getServiceName(log.service_id);
+        return `<div class="combined-log-line combined-log-line-${log.level}">
+            <span class="combined-log-timestamp">[${timestamp}]</span>
+            <span class="combined-log-service">${escapeHtml(serviceName)}</span>
+            <span class="combined-log-level">[${log.level.toUpperCase()}]</span>
+            <span class="combined-log-message">${escapeHtml(log.message)}</span>
+        </div>`;
+    }).join('');
+    
+    // Auto-scroll to bottom
+    display.scrollTop = display.scrollHeight;
+}
+
+function startCombinedLogStreaming() {
+    // Close existing stream
+    if (combinedLogEventSource) {
+        combinedLogEventSource.close();
+    }
+    
+    // Start new stream
+    combinedLogEventSource = new EventSource(`${API_BASE}/logs/combined/stream`);
+    combinedLogEventSource.onmessage = (event) => {
+        try {
+            const logEntry = JSON.parse(event.data);
+            
+            // Apply current filter to streamed logs
+            const level = document.getElementById('combinedLogsLevel').value;
+            const search = document.getElementById('combinedLogsSearch').value;
+            
+            let shouldShow = true;
+            
+            if (level && level !== 'all' && logEntry.level.toLowerCase() !== level.toLowerCase()) {
+                shouldShow = false;
+            }
+            
+            if (search && !logEntry.message.toLowerCase().includes(search.toLowerCase())) {
+                shouldShow = false;
+            }
+            
+            if (shouldShow) {
+                combinedLogs.push(logEntry);
+                
+                // Keep only last 1000 logs
+                if (combinedLogs.length > 1000) {
+                    combinedLogs.shift();
+                }
+                
+                const display = document.getElementById('combinedLogsDisplay');
+                if (display) {
+                    const timestamp = new Date(logEntry.timestamp).toLocaleString();
+                    const serviceName = getServiceName(logEntry.service_id);
+                    const isAtBottom = display.scrollHeight - display.scrollTop <= display.clientHeight + 10;
+                    
+                    const logLine = document.createElement('div');
+                    logLine.className = `combined-log-line combined-log-line-${logEntry.level}`;
+                    logLine.innerHTML = `
+                        <span class="combined-log-timestamp">[${timestamp}]</span>
+                        <span class="combined-log-service">${escapeHtml(serviceName)}</span>
+                        <span class="combined-log-level">[${logEntry.level.toUpperCase()}]</span>
+                        <span class="combined-log-message">${escapeHtml(logEntry.message)}</span>
+                    `;
+                    display.appendChild(logLine);
+                    
+                    // Auto-scroll only if already at bottom
+                    if (isAtBottom) {
+                        display.scrollTop = display.scrollHeight;
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('Error parsing combined log entry:', e);
+        }
+    };
+    
+    combinedLogEventSource.onerror = (error) => {
+        console.error('Combined logs stream error:', error);
+        // Reconnect after 3 seconds
+        setTimeout(() => {
+            if (!isCombinedLogsCollapsed) {
+                startCombinedLogStreaming();
+            }
+        }, 3000);
+    };
+}
+
+function applyCombinedLogFilter() {
+    loadCombinedLogs();
+    // Restart streaming to apply new filter
+    if (!isCombinedLogsCollapsed) {
+        startCombinedLogStreaming();
+    }
+}
+
+function clearCombinedLogFilter() {
+    document.getElementById('combinedLogsLevel').value = 'all';
+    document.getElementById('combinedLogsSearch').value = '';
+    applyCombinedLogFilter();
+}
+
+function toggleCombinedLogsArea() {
+    const area = document.getElementById('combinedLogsArea');
+    const icon = document.getElementById('toggleCombinedLogsIcon');
+    const btn = document.getElementById('toggleCombinedLogsBtn');
+    
+    if (!area || !icon || !btn) return;
+    
+    isCombinedLogsCollapsed = !isCombinedLogsCollapsed;
+    
+    if (isCombinedLogsCollapsed) {
+        area.classList.add('collapsed');
+        icon.textContent = '▶';
+        btn.innerHTML = '<span id="toggleCombinedLogsIcon">▶</span> Expand';
+        // Stop streaming when collapsed
+        if (combinedLogEventSource) {
+            combinedLogEventSource.close();
+            combinedLogEventSource = null;
+        }
+    } else {
+        area.classList.remove('collapsed');
+        icon.textContent = '▼';
+        btn.innerHTML = '<span id="toggleCombinedLogsIcon">▼</span> Collapse';
+        // Restart streaming when expanded
+        loadCombinedLogs();
+        startCombinedLogStreaming();
+    }
 }
 

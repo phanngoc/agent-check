@@ -16,6 +16,44 @@
             </div>
         </header>
 
+        <!-- Combined Logs Area -->
+        <div id="combinedLogsArea" class="combined-logs-area">
+            <div class="combined-logs-header">
+                <div class="combined-logs-title">
+                    <h2>📋 Combined Logs</h2>
+                    <span class="combined-logs-subtitle">All services logs combined</span>
+                </div>
+                <button id="toggleCombinedLogsBtn" class="btn btn-secondary" onclick="toggleCombinedLogsArea()">
+                    <span id="toggleCombinedLogsIcon">▼</span> Collapse
+                </button>
+            </div>
+            <div id="combinedLogsContent" class="combined-logs-content">
+                <div class="combined-logs-filters">
+                    <div class="filter-row">
+                        <div class="filter-group">
+                            <label>Level:</label>
+                            <select id="combinedLogsLevel">
+                                <option value="all">All</option>
+                                <option value="error">Error</option>
+                                <option value="warn">Warn</option>
+                                <option value="info">Info</option>
+                                <option value="debug">Debug</option>
+                            </select>
+                        </div>
+                        <div class="filter-group filter-group-full">
+                            <label>Search:</label>
+                            <input type="text" id="combinedLogsSearch" placeholder="Search in log messages...">
+                        </div>
+                        <div class="filter-group">
+                            <button class="btn btn-primary" onclick="applyCombinedLogFilter()">Apply</button>
+                            <button class="btn btn-secondary" onclick="clearCombinedLogFilter()">Clear</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="combinedLogsDisplay" class="combined-logs-display"></div>
+            </div>
+        </div>
+
         <div class="tabs">
             <button class="tab-btn active" data-tab="services">Services</button>
             <button class="tab-btn" data-tab="containers">Docker Containers</button>

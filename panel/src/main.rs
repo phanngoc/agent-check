@@ -1,4 +1,5 @@
 mod config;
+mod database;
 mod docker_manager;
 mod log_manager;
 mod metrics;

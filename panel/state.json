@@ -2,36 +2,36 @@
   "services": [
     {
       "service_id": "backend",
-      "pid": 3632901,
-      "started_at": "2025-11-21T02:28:25.334767568Z",
+      "pid": 17747,
+      "started_at": "2025-11-22T04:19:13.999303Z",
       "command": "air",
-      "working_dir": "/home/phan.ngoc@sun-asterisk.com/Documents/projects/agent-check/backend",
+      "working_dir": "/Users/ngocp/Documents/projects/agent-check/backend",
       "environment": {}
     },
     {
       "service_id": "dashboard",
-      "pid": 3633080,
-      "started_at": "2025-11-21T02:28:27.680441587Z",
+      "pid": 17916,
+      "started_at": "2025-11-22T04:19:17.060224Z",
       "command": "npm run dev",
-      "working_dir": "/home/phan.ngoc@sun-asterisk.com/Documents/projects/agent-check/dashboard",
+      "working_dir": "/Users/ngocp/Documents/projects/agent-check/dashboard",
       "environment": {}
     },
     {
       "service_id": "tracker",
-      "pid": 3635573,
-      "started_at": "2025-11-21T02:30:53.936761441Z",
+      "pid": 18016,
+      "started_at": "2025-11-22T04:19:18.664574Z",
       "command": "npm run dev",
-      "working_dir": "/home/phan.ngoc@sun-asterisk.com/Documents/projects/agent-check/tracker",
+      "working_dir": "/Users/ngocp/Documents/projects/agent-check/tracker",
       "environment": {}
     },
     {
       "service_id": "demo",
-      "pid": 3635674,
-      "started_at": "2025-11-21T02:31:01.173117869Z",
+      "pid": 18111,
+      "started_at": "2025-11-22T04:19:19.552246Z",
       "command": "php artisan serve",
-      "working_dir": "/home/phan.ngoc@sun-asterisk.com/Documents/projects/agent-check/demo/blog",
+      "working_dir": "/Users/ngocp/Documents/projects/agent-check/demo/blog",
       "environment": {}
     }
   ],
-  "updated_at": "2025-11-21T02:31:01.173401117Z"
+  "updated_at": "2025-11-22T04:19:19.553056Z"
 }

@@ -55,7 +55,7 @@ pub async fn start_server(config: Config) -> Result<()> {
     );
     
     let log_manager = Arc::new(
-        LogManager::new(logs_dir).context("Failed to initialize log manager")?
+        LogManager::new(logs_dir.clone(), Some(config.data_dir.clone())).context("Failed to initialize log manager")?
     );
     
     // Determine static files path
@@ -77,6 +77,45 @@ pub async fn start_server(config: Config) -> Result<()> {
     for service in &detected_services {
         let _ = log_manager.register_service(service.id.clone()).await;
     }
+
+    // Background task: Migrate existing logs to database (non-blocking)
+    let log_manager_clone = log_manager.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await; // Wait 5 seconds after startup
+        match log_manager_clone.migrate_all_file_logs_to_db().await {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Migrated {} log entries from files to database", count);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to migrate logs to database: {}", e);
+            }
+        }
+    });
+
+    // Background task: Cleanup old logs (run daily)
+    let log_manager_cleanup = log_manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(86400)); // 24 hours
+        interval.tick().await; // Skip first tick
+        
+        loop {
+            interval.tick().await;
+            if let Some(db) = log_manager_cleanup.get_database() {
+                match db.cleanup_old_logs(30).await {
+                    Ok(deleted) => {
+                        if deleted > 0 {
+                            info!("Cleaned up {} old log entries (older than 30 days)", deleted);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to cleanup old logs: {}", e);
+                    }
+                }
+            }
+        }
+    });
 
     // Recover processes from state file
     info!("Recovering processes from previous session...");
@@ -107,12 +146,16 @@ pub async fn start_server(config: Config) -> Result<()> {
         .route("/api/services/:id/logs", get(get_service_logs))
         .route("/api/services/:id/metrics", get(get_service_metrics))
         .route("/api/services/:id", get(get_service_detail))
+        .route("/api/logs/combined/stream", get(stream_combined_logs))
+        .route("/api/logs/combined", get(get_combined_logs))
         .route("/api/containers", get(list_containers))
         .route("/api/containers/:id/start", post(start_container))
         .route("/api/containers/:id/stop", post(stop_container))
         .route("/api/containers/:id/restart", post(restart_container))
         .route("/api/containers/:id/logs", get(get_container_logs))
         .route("/api/system/metrics", get(get_system_metrics))
+        .route("/api/logs/cleanup", post(cleanup_logs))
+        .route("/api/logs/stats", get(get_log_stats))
         .nest_service("/", ServeDir::new(static_path))
         .layer(CorsLayer::permissive())
         .with_state(app_state);
@@ -531,5 +574,112 @@ async fn get_system_metrics(
         })?;
     
     Ok(Json(metrics))
+}
+
+async fn get_combined_logs(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<FilteredLogsResponse>, StatusCode> {
+    let level = params.get("level").map(|s| s.as_str());
+    let search = params.get("search").map(|s| s.as_str());
+    let lines = params.get("lines")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(100);
+    
+    let result = state.log_manager.get_combined_logs(level, search, Some(lines)).await
+        .map_err(|e| {
+            error!("Failed to get combined logs: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    
+    Ok(Json(result))
+}
+
+async fn stream_combined_logs(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let receivers = state.log_manager.get_combined_log_receivers().await;
+    
+    let stream = async_stream::stream! {
+        // Create a vector to hold all receivers
+        let mut receivers_vec: Vec<(String, tokio::sync::broadcast::Receiver<LogEntry>)> = receivers;
+        
+        loop {
+            let mut any_received = false;
+            
+            // Check all receivers for new messages
+            for (_service_id, receiver) in &mut receivers_vec {
+                match receiver.try_recv() {
+                    Ok(entry) => {
+                        any_received = true;
+                        let json = serde_json::to_string(&entry).unwrap_or_default();
+                        yield Ok(Event::default().data(json));
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                        // No message available, continue
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                        // Lagged, continue
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                        // Channel closed, continue
+                    }
+                }
+            }
+            
+            if !any_received {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        }
+    };
+    
+    Sse::new(stream)
+}
+
+async fn cleanup_logs(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<HashMap<String, usize>>, StatusCode> {
+    let days = params.get("days")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(30);
+
+    let database = match state.log_manager.get_database() {
+        Some(db) => db,
+        None => {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+
+    let deleted = database.cleanup_old_logs(days).await
+        .map_err(|e| {
+            error!("Failed to cleanup logs: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut response = HashMap::new();
+    response.insert("deleted".to_string(), deleted);
+    response.insert("days".to_string(), days as usize);
+
+    Ok(Json(response))
+}
+
+async fn get_log_stats(
+    State(state): State<AppState>,
+) -> Result<Json<HashMap<String, usize>>, StatusCode> {
+    let database = match state.log_manager.get_database() {
+        Some(db) => db,
+        None => {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+
+    let stats = database.get_log_stats().await
+        .map_err(|e| {
+            error!("Failed to get log stats: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(stats))
 }
 

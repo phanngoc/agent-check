@@ -17,23 +17,50 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Check if cargo-watch is installed
-if ! command -v cargo-watch &> /dev/null; then
-    echo -e "${RED}❌ cargo-watch is not installed!${NC}"
-    echo -e "${YELLOW}Please install it with: cargo install cargo-watch${NC}"
-    exit 1
+# Check if cargo-watch is installed, if not try alternatives
+USE_CARGO_WATCH=false
+USE_WATCHEXEC=false
+
+if command -v cargo-watch &> /dev/null; then
+    USE_CARGO_WATCH=true
+elif command -v watchexec &> /dev/null; then
+    USE_WATCHEXEC=true
+    echo -e "${YELLOW}⚠️  cargo-watch not found, using watchexec instead${NC}"
+else
+    echo -e "${YELLOW}⚠️  No hot reload tool found. Trying to install cargo-watch...${NC}"
+    echo -e "${BLUE}This may take a few minutes...${NC}"
+    
+    # Try to install cargo-watch with minimal features
+    if cargo install cargo-watch --no-default-features --features watchexec-notify 2>&1; then
+        USE_CARGO_WATCH=true
+        echo -e "${GREEN}✅ cargo-watch installed successfully!${NC}"
+    else
+        echo -e "${RED}❌ Failed to install cargo-watch${NC}"
+        echo -e "${YELLOW}You can install watchexec as alternative: brew install watchexec${NC}"
+        echo -e "${YELLOW}Or run without hot reload (manual restart required)${NC}"
+    fi
 fi
 
-echo -e "${GREEN}🚀 Starting Rust Panel with hot reloading...${NC}"
+echo -e "${GREEN}🚀 Starting Rust Panel...${NC}"
 echo -e "${CYAN}========================================${NC}"
-echo -e "${BLUE}Watching for changes in src/ directory${NC}"
-echo -e "${YELLOW}Press Ctrl+C to stop${NC}"
-echo ""
 
-# Run cargo-watch with hot reloading
-# -x 'run' : execute 'cargo run' on changes
-# -w src : watch only src directory
-# -d 0.2 : delay 0.2 seconds before rebuilding (debounce)
-# -c : clear screen on rebuild
-cargo watch -x 'run' -w src -d 0.2 -c
+if [ "$USE_CARGO_WATCH" = true ]; then
+    echo -e "${BLUE}Watching for changes in src/ directory (cargo-watch)${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to stop${NC}"
+    echo ""
+    # Run cargo-watch with hot reloading
+    cargo watch -x 'run' -w src -d 0.2 -c
+elif [ "$USE_WATCHEXEC" = true ]; then
+    echo -e "${BLUE}Watching for changes in src/ directory (watchexec)${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to stop${NC}"
+    echo ""
+    # Run with watchexec
+    watchexec -w src -d 200ms -c -- cargo run
+else
+    echo -e "${BLUE}Running without hot reload${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to stop${NC}"
+    echo -e "${CYAN}Note: You'll need to manually restart after code changes${NC}"
+    echo ""
+    cargo run
+fi
 

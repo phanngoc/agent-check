@@ -2,36 +2,36 @@
   "services": [
     {
       "service_id": "backend",
-      "pid": 17747,
-      "started_at": "2025-11-22T04:19:13.999303Z",
+      "pid": 68503,
+      "started_at": "2025-11-22T04:35:14.129139Z",
       "command": "air",
       "working_dir": "/Users/ngocp/Documents/projects/agent-check/backend",
       "environment": {}
     },
     {
       "service_id": "dashboard",
-      "pid": 17916,
-      "started_at": "2025-11-22T04:19:17.060224Z",
+      "pid": 69238,
+      "started_at": "2025-11-22T04:35:28.894101Z",
       "command": "npm run dev",
       "working_dir": "/Users/ngocp/Documents/projects/agent-check/dashboard",
       "environment": {}
     },
     {
       "service_id": "tracker",
-      "pid": 18016,
-      "started_at": "2025-11-22T04:19:18.664574Z",
+      "pid": 69687,
+      "started_at": "2025-11-22T04:35:37.891375Z",
       "command": "npm run dev",
       "working_dir": "/Users/ngocp/Documents/projects/agent-check/tracker",
       "environment": {}
     },
     {
       "service_id": "demo",
-      "pid": 18111,
-      "started_at": "2025-11-22T04:19:19.552246Z",
+      "pid": 69888,
+      "started_at": "2025-11-22T04:35:41.287961Z",
       "command": "php artisan serve",
       "working_dir": "/Users/ngocp/Documents/projects/agent-check/demo/blog",
       "environment": {}
     }
   ],
-  "updated_at": "2025-11-22T04:19:19.553056Z"
+  "updated_at": "2025-11-22T04:35:41.288215Z"
 }

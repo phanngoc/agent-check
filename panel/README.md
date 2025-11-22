@@ -50,7 +50,34 @@ cargo run
 
 Panel sẽ tự động phát hiện project root và các services.
 
-## Development
+## Frontend Development
+
+Frontend được xây dựng với SolidJS + TypeScript + Tailwind CSS + shadcn-solid.
+
+### Setup Frontend
+
+```bash
+cd panel
+npm install
+```
+
+### Chạy Frontend Development Server
+
+```bash
+npm run dev
+```
+
+Frontend dev server sẽ chạy tại `http://localhost:5173` với proxy đến backend API tại `http://localhost:9000`.
+
+### Build Frontend
+
+```bash
+npm run build
+```
+
+Build output sẽ được tạo trong `static/` directory.
+
+## Backend Development
 
 ### Chạy Development Mode với Hot Reload
 
@@ -184,7 +211,7 @@ Panel tự động phát hiện containers từ `docker-compose.yml`:
 
 ```
 panel/
-├── src/
+├── src/                     # Rust backend source
 │   ├── main.rs              # Entry point
 │   ├── server.rs             # HTTP server & API
 │   ├── process_manager.rs   # Process management
@@ -195,13 +222,23 @@ panel/
 │   ├── metrics.rs           # Metrics collection
 │   ├── config.rs            # Configuration
 │   └── models.rs            # Data models
-├── static/                  # Web UI
+├── src/                     # Frontend source (SolidJS + TypeScript)
+│   ├── main.tsx             # Entry point
+│   ├── App.tsx              # Root component
+│   ├── components/          # UI components
+│   ├── pages/               # Page components
+│   ├── stores/              # State management
+│   ├── api/                 # API client
+│   └── types/               # TypeScript types
+├── static/                  # Web UI (build output)
 │   ├── index.html
-│   ├── app.js
-│   └── styles.css
+│   └── assets/              # Vite build assets
 ├── logs/                    # Log files (gitignored)
 ├── data/                    # SQLite database (gitignored)
 │   └── logs.db
+├── package.json             # Frontend dependencies
+├── vite.config.ts           # Vite configuration
+├── tailwind.config.js       # Tailwind CSS configuration
 └── dev.sh                   # Development script with hot reload
 ```
 

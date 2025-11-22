@@ -22,6 +22,8 @@ use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
 };
+use axum::response::{Html, Response};
+use std::fs;
 use tracing::{info, error, debug, warn};
 use futures::Stream;
 use chrono::Utc;
@@ -156,7 +158,8 @@ pub async fn start_server(config: Config) -> Result<()> {
         .route("/api/system/metrics", get(get_system_metrics))
         .route("/api/logs/cleanup", post(cleanup_logs))
         .route("/api/logs/stats", get(get_log_stats))
-        .nest_service("/", ServeDir::new(static_path))
+        .nest_service("/assets", ServeDir::new(format!("{}/assets", static_path)))
+        .fallback(serve_spa_handler)
         .layer(CorsLayer::permissive())
         .with_state(app_state);
 
@@ -170,6 +173,22 @@ pub async fn start_server(config: Config) -> Result<()> {
         .context("Server error")?;
 
     Ok(())
+}
+
+// SPA fallback handler - serve index.html for all non-API routes
+async fn serve_spa_handler() -> Result<Html<String>, StatusCode> {
+    let static_path = if std::path::Path::new("static").exists() {
+        "static"
+    } else {
+        "panel/static"
+    };
+    
+    let index_path = format!("{}/index.html", static_path);
+    
+    match fs::read_to_string(&index_path) {
+        Ok(content) => Ok(Html(content)),
+        Err(_) => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 async fn list_services(State(state): State<AppState>) -> Json<Vec<Service>> {

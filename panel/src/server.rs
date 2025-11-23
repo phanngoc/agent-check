@@ -661,11 +661,25 @@ async fn get_combined_logs(
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(100);
     
-    let result = state.log_manager.get_combined_logs(level, search, Some(lines)).await
-        .map_err(|e| {
-            error!("Failed to get combined logs: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // Check if we have filters: level != "all" or search is not empty
+    let has_filter = level.map(|l| l.to_lowercase() != "all").unwrap_or(false)
+        || search.map(|s| !s.is_empty()).unwrap_or(false);
+    
+    let result = if has_filter {
+        // Filtered mode: query from TimescaleDB
+        state.log_manager.get_combined_logs_filtered(level, search, Some(lines)).await
+            .map_err(|e| {
+                error!("Failed to get filtered combined logs: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    } else {
+        // Realtime mode: get from files
+        state.log_manager.get_combined_logs_realtime(Some(lines)).await
+            .map_err(|e| {
+                error!("Failed to get realtime combined logs: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    };
     
     Ok(Json(result))
 }

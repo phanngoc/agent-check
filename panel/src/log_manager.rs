@@ -506,6 +506,89 @@ impl LogManager {
         log_files.keys().cloned().collect()
     }
 
+    /// Get combined logs from all services (realtime mode - from files only)
+    /// This method reads directly from log files without querying database
+    pub async fn get_combined_logs_realtime(
+        &self,
+        lines: Option<usize>,
+    ) -> Result<FilteredLogsResponse> {
+        let service_ids = self.get_service_ids().await;
+        let mut all_entries: Vec<LogEntry> = Vec::new();
+
+        // Collect logs from all services
+        for service_id in service_ids {
+            if let Ok(log_lines) = self.get_logs(&service_id, lines).await {
+                for line in log_lines {
+                    let (level, timestamp) = Self::parse_log_line(&line);
+                    all_entries.push(LogEntry {
+                        timestamp,
+                        service_id: service_id.clone(),
+                        level,
+                        message: line,
+                    });
+                }
+            }
+        }
+
+        let total = all_entries.len();
+
+        // Sort by timestamp (newest first)
+        all_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        // Get first N lines if specified (newest first)
+        let logs = if let Some(n) = lines {
+            let end = n.min(all_entries.len());
+            all_entries[..end].to_vec()
+        } else {
+            all_entries
+        };
+
+        let filtered_count = logs.len();
+
+        Ok(FilteredLogsResponse {
+            logs,
+            total,
+            filtered: filtered_count,
+        })
+    }
+
+    /// Get combined logs from all services (filtered mode - from TimescaleDB)
+    /// This method queries TimescaleDB with filters, no file fallback
+    pub async fn get_combined_logs_filtered(
+        &self,
+        level_filter: Option<&str>,
+        search: Option<&str>,
+        lines: Option<usize>,
+    ) -> Result<FilteredLogsResponse> {
+        let limit = lines.unwrap_or(1000);
+        
+        // Only use TimescaleDB for filtered queries
+        if let Some(timescale_db) = &self.timescale_db {
+            let filters = LogFilters {
+                service_id: None, // None means all services
+                level: level_filter.map(|s| s.to_string()),
+                from: None,
+                to: None,
+                search: search.map(|s| s.to_string()),
+                limit,
+                offset: 0,
+            };
+
+            let entries = timescale_db.get_combined_logs(filters).await?;
+            let total = timescale_db.get_log_count(None).await.unwrap_or(0);
+            let filtered = entries.len();
+
+            Ok(FilteredLogsResponse {
+                logs: entries,
+                total,
+                filtered,
+            })
+        } else {
+            // If TimescaleDB is not available, return error for filtered queries
+            Err(anyhow::anyhow!("TimescaleDB is required for filtered log queries"))
+        }
+    }
+
     /// Get combined logs from all services
     pub async fn get_combined_logs(
         &self,

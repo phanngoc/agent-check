@@ -63,10 +63,24 @@ export const CombinedLogs: Component = () => {
   };
 
   const applyFilter = async () => {
-    const params: any = { lines: 100 };
-    if (level() !== "all") params.level = level();
-    if (search()) params.search = search();
-    await loadLogs(params);
+    // Check if we have filters: level != "all" or search is not empty
+    const hasFilter = level() !== "all" || search().trim() !== "";
+    
+    // Always stop streaming first
+    stopStreaming();
+    
+    if (hasFilter) {
+      // Filtered mode: query from TimescaleDB, no streaming
+      const params: any = { lines: 100 };
+      if (level() !== "all") params.level = level();
+      if (search().trim()) params.search = search().trim();
+      await loadLogs(params);
+      // Don't start streaming for filtered mode
+    } else {
+      // Realtime mode: get from files, then start streaming
+      await loadLogs({ lines: 100 });
+      startStreaming();
+    }
   };
 
   // Debounced version of applyFilter
@@ -100,8 +114,11 @@ export const CombinedLogs: Component = () => {
   // Only load logs when component is first mounted and not collapsed
   onMount(() => {
     if (!collapsed()) {
-      applyFilter();
-      startStreaming();
+      // On mount, start with realtime mode (no filters)
+      stopStreaming();
+      loadLogs({ lines: 100 }).then(() => {
+        startStreaming();
+      });
     }
     isInitialMount = false;
   });
@@ -119,7 +136,6 @@ export const CombinedLogs: Component = () => {
     // Only trigger when expanding (was collapsed, now not collapsed)
     if (previousCollapsed === true && currentCollapsed === false) {
       applyFilter();
-      startStreaming();
     } else if (currentCollapsed === true) {
       // Stop streaming when collapsing
       stopStreaming();
@@ -187,6 +203,7 @@ export const CombinedLogs: Component = () => {
                     clearTimeout(debounceTimer);
                     debounceTimer = null;
                   }
+                  // applyFilter will handle realtime vs filtered mode
                   applyFilter();
                 }}
               >

@@ -55,55 +55,12 @@ pub async fn start_server(config: Config) -> Result<()> {
     let docker_manager = Arc::new(
         DockerManager::new().await.context("Failed to initialize Docker manager")?
     );
-    
-    // Ensure panel_session_id exists
-    let panel_session_id = config.panel_session_id.unwrap_or_else(|| {
-        let id = uuid::Uuid::new_v4();
-        info!("Generated new panel_session_id: {}", id);
-        id
-    });
-
-    // Create panel session in backend if needed
-    let backend_api_url = config.backend_api_url.clone();
-    let session_id_for_api = panel_session_id;
-    tokio::spawn(async move {
-        // Try to create panel session in backend
-        let client = reqwest::Client::new();
-        let session_req = serde_json::json!({
-            "user_id": "panel",
-            "page_url": "panel://logs",
-            "metadata": {
-                "source": "panel",
-                "type": "log_collector"
-            }
-        });
-
-        match client
-            .post(&format!("{}/sessions", backend_api_url))
-            .json(&session_req)
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    info!("Panel session created/verified in backend");
-                } else {
-                    warn!("Failed to create panel session in backend: {}", resp.status());
-                }
-            }
-            Err(e) => {
-                warn!("Failed to connect to backend to create session: {}", e);
-            }
-        }
-    });
 
     let log_manager = Arc::new(
         LogManager::new(
             logs_dir.clone(),
             Some(config.data_dir.clone()),
             Some(&config.timescale_db_url),
-            &config.backend_api_url,
-            panel_session_id,
         )
         .await
         .context("Failed to initialize log manager")?
@@ -128,22 +85,6 @@ pub async fn start_server(config: Config) -> Result<()> {
     for service in &detected_services {
         let _ = log_manager.register_service(service.id.clone()).await;
     }
-
-    // Background task: Migrate existing logs to TimescaleDB (non-blocking)
-    let log_manager_clone = log_manager.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await; // Wait 5 seconds after startup
-        match log_manager_clone.migrate_all_file_logs_to_timescale().await {
-            Ok(count) => {
-                if count > 0 {
-                    info!("Migrated {} log entries from files to TimescaleDB", count);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to migrate logs to TimescaleDB: {}", e);
-            }
-        }
-    });
 
     // Background task: Cleanup old logs (run daily)
     // Note: TimescaleDB has its own retention policy, so we only cleanup SQLite if used
@@ -665,21 +606,29 @@ async fn get_combined_logs(
     let has_filter = level.map(|l| l.to_lowercase() != "all").unwrap_or(false)
         || search.map(|s| !s.is_empty()).unwrap_or(false);
     
+    info!("[Server] get_combined_logs called - has_filter: {}, level: {:?}, search: {:?}, lines: {}", 
+        has_filter, level, search, lines);
+    
     let result = if has_filter {
         // Filtered mode: query from TimescaleDB
+        debug!("[Server] Using filtered mode (TimescaleDB)");
         state.log_manager.get_combined_logs_filtered(level, search, Some(lines)).await
             .map_err(|e| {
-                error!("Failed to get filtered combined logs: {}", e);
+                error!("[Server] Failed to get filtered combined logs: {}", e);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?
     } else {
         // Realtime mode: get from files
+        debug!("[Server] Using realtime mode (files)");
         state.log_manager.get_combined_logs_realtime(Some(lines)).await
             .map_err(|e| {
-                error!("Failed to get realtime combined logs: {}", e);
+                error!("[Server] Failed to get realtime combined logs: {}", e);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?
     };
+    
+    info!("[Server] get_combined_logs returning {} logs (total: {}, filtered: {})", 
+        result.logs.len(), result.total, result.filtered);
     
     Ok(Json(result))
 }

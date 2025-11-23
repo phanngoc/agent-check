@@ -3,8 +3,6 @@ use crate::database::LogDatabase;
 use crate::models::{FilteredLogsResponse, LogEntry};
 use crate::timescale_db::{TimescaleDatabase, LogFilters};
 use chrono::{DateTime, Utc};
-use reqwest::Client as HttpClient;
-use serde_json::json;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -12,7 +10,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
 pub struct LogManager {
     log_files: Arc<RwLock<HashMap<String, PathBuf>>>,
@@ -21,10 +18,6 @@ pub struct LogManager {
     logs_dir: PathBuf,
     database: Option<Arc<LogDatabase>>, // Keep for fallback
     timescale_db: Option<Arc<TimescaleDatabase>>,
-    http_client: Arc<HttpClient>,
-    backend_api_url: String,
-    panel_session_id: Uuid,
-    log_batch: Arc<RwLock<Vec<LogEntry>>>, // Batch logs before sending
 }
 
 impl LogManager {
@@ -32,8 +25,6 @@ impl LogManager {
         logs_dir: PathBuf,
         data_dir: Option<PathBuf>,
         timescale_db_url: Option<&str>,
-        backend_api_url: &str,
-        panel_session_id: Uuid,
     ) -> Result<Self> {
         // Create logs directory if it doesn't exist
         std::fs::create_dir_all(&logs_dir)
@@ -75,30 +66,6 @@ impl LogManager {
             None // Don't use SQLite if TimescaleDB is available
         };
 
-        let http_client = Arc::new(HttpClient::new());
-        let log_batch = Arc::new(RwLock::new(Vec::new()));
-
-        // Start batch flush task
-        let batch_clone = log_batch.clone();
-        let client_clone = http_client.clone();
-        let api_url = backend_api_url.to_string();
-        let session_id = panel_session_id;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let mut batch = batch_clone.write().await;
-                if !batch.is_empty() {
-                    let events: Vec<_> = batch.drain(..).collect();
-                    drop(batch);
-                    if let Err(e) = Self::send_logs_to_api(&client_clone, &api_url, session_id, &events).await {
-                        tracing::warn!("Failed to send log batch to API: {}", e);
-                        // Re-add events to batch on failure (optional, might cause duplicates)
-                    }
-                }
-            }
-        });
-
         Ok(Self {
             log_files: Arc::new(RwLock::new(HashMap::new())),
             log_senders: Arc::new(RwLock::new(HashMap::new())),
@@ -106,59 +73,9 @@ impl LogManager {
             logs_dir,
             database,
             timescale_db,
-            http_client,
-            backend_api_url: backend_api_url.to_string(),
-            panel_session_id,
-            log_batch,
         })
     }
 
-    async fn send_logs_to_api(
-        client: &HttpClient,
-        api_url: &str,
-        session_id: Uuid,
-        entries: &[LogEntry],
-    ) -> Result<()> {
-        let events: Vec<serde_json::Value> = entries
-            .iter()
-            .map(|entry| {
-                json!({
-                    "timestamp": entry.timestamp.to_rfc3339(),
-                    "event_type": "log",
-                    "page_url": entry.service_id,
-                    "event_data": {
-                        "service_id": entry.service_id,
-                        "level": entry.level,
-                        "message": entry.message
-                    }
-                })
-            })
-            .collect();
-
-        let payload = json!({
-            "session_id": session_id.to_string(),
-            "events": events
-        });
-
-        let response = client
-            .post(&format!("{}/track", api_url))
-            .json(&payload)
-            .send()
-            .await
-            .context("Failed to send request to backend API")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Backend API returned error: {} - {}",
-                status,
-                text
-            ));
-        }
-
-        Ok(())
-    }
 
     pub async fn register_service(&self, service_id: String) -> Result<()> {
         let log_path = self.logs_dir.join(format!("{}.log", service_id));
@@ -184,10 +101,26 @@ impl LogManager {
     async fn start_log_watcher(&self, service_id: String, log_path: PathBuf) {
         let log_senders = self.log_senders.clone();
         let log_positions = self.log_positions.clone();
-        let log_batch = self.log_batch.clone();
+        let timescale_db = self.timescale_db.clone();
+
+        // Get or create panel session_id for TimescaleDB
+        let session_id = if let Some(db) = &timescale_db {
+            match db.create_or_get_panel_session().await {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::error!("[LogManager] Failed to get panel session_id: {}. Logs will not be saved to TimescaleDB.", e);
+                    None
+                }
+            }
+        } else {
+            tracing::warn!("[LogManager] TimescaleDB not available. Logs will only be broadcast, not saved.");
+            None
+        };
 
         tokio::spawn(async move {
             let mut last_position = 0u64;
+            let mut local_batch: Vec<LogEntry> = Vec::new();
+            const BATCH_SIZE: usize = 50; // Insert in batches of 50 for better performance
 
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -240,7 +173,12 @@ impl LogManager {
                             last_position = current_size;
                             log_positions.write().await.insert(service_id.clone(), last_position);
 
-                            // Process new lines: broadcast and add to batch for API
+                            let new_lines_count = new_lines.len();
+                            if new_lines_count > 0 {
+                                tracing::debug!("[LogManager] Read {} new log lines from {} (service: {})", new_lines_count, log_path.display(), service_id);
+                            }
+
+                            // Process new lines: broadcast and save to TimescaleDB
                             for line in new_lines {
                                 let (level, timestamp) = Self::parse_log_line(&line);
                                 let entry = LogEntry {
@@ -253,9 +191,48 @@ impl LogManager {
                                 // Broadcast for realtime streaming
                                 let _ = sender.send(entry.clone());
 
-                                // Add to batch for sending to backend API
-                                let mut batch = log_batch.write().await;
-                                batch.push(entry);
+                                // Add to local batch for TimescaleDB
+                                if let (Some(db), Some(sid)) = (&timescale_db, &session_id) {
+                                    local_batch.push(entry);
+
+                                    // Insert batch when it reaches BATCH_SIZE
+                                    if local_batch.len() >= BATCH_SIZE {
+                                        let batch_to_insert = std::mem::take(&mut local_batch);
+                                        let db_clone = db.clone();
+                                        let session_id_clone = *sid;
+                                        let service_id_clone = service_id.clone();
+                                        tokio::spawn(async move {
+                                            match db_clone.insert_logs(session_id_clone, &batch_to_insert).await {
+                                                Ok(_) => {
+                                                    tracing::debug!("[LogManager] Successfully inserted {} log entries to TimescaleDB (service: {})", batch_to_insert.len(), service_id_clone);
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("[LogManager] Failed to insert logs to TimescaleDB (service: {}): {}", service_id_clone, e);
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+
+                            // Flush remaining batch if any
+                            if let (Some(db), Some(sid)) = (&timescale_db, &session_id) {
+                                if !local_batch.is_empty() {
+                                    let batch_to_insert = std::mem::take(&mut local_batch);
+                                    let db_clone = db.clone();
+                                    let session_id_clone = *sid;
+                                    let service_id_clone = service_id.clone();
+                                    tokio::spawn(async move {
+                                        match db_clone.insert_logs(session_id_clone, &batch_to_insert).await {
+                                            Ok(_) => {
+                                                tracing::debug!("[LogManager] Successfully inserted {} log entries to TimescaleDB (service: {})", batch_to_insert.len(), service_id_clone);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("[LogManager] Failed to insert logs to TimescaleDB (service: {}): {}", service_id_clone, e);
+                                            }
+                                        }
+                                    });
+                                }
                             }
                         }
                     }
@@ -722,69 +699,6 @@ impl LogManager {
         self.timescale_db.clone()
     }
 
-    /// Migrate logs from file to TimescaleDB via API for a specific service
-    pub async fn migrate_file_logs_to_timescale(&self, service_id: &str) -> Result<usize> {
-        let log_path = {
-            let log_files = self.log_files.read().await;
-            log_files.get(service_id)
-                .context("Service log file not found")?
-                .clone()
-        };
-
-        // Read all lines from file
-        let file = File::open(&log_path)
-            .context("Failed to open log file")?;
-
-        let reader = BufReader::new(file);
-        let lines: Vec<String> = reader
-            .lines()
-            .filter_map(|l| l.ok())
-            .filter(|l| !l.trim().is_empty())
-            .collect();
-
-        if lines.is_empty() {
-            return Ok(0);
-        }
-
-        // Parse lines to LogEntry
-        let entries: Vec<LogEntry> = lines.into_iter().map(|line| {
-            let (level, timestamp) = Self::parse_log_line(&line);
-            LogEntry {
-                timestamp,
-                service_id: service_id.to_string(),
-                level,
-                message: line,
-            }
-        }).collect();
-
-        // Send to backend API in batches
-        let batch_size = 100;
-        for chunk in entries.chunks(batch_size) {
-            Self::send_logs_to_api(&self.http_client, &self.backend_api_url, self.panel_session_id, chunk).await?;
-        }
-
-        Ok(entries.len())
-    }
-
-    /// Migrate logs from all registered services to TimescaleDB
-    pub async fn migrate_all_file_logs_to_timescale(&self) -> Result<usize> {
-        let service_ids = self.get_service_ids().await;
-        let mut total_migrated = 0;
-
-        for service_id in service_ids {
-            match self.migrate_file_logs_to_timescale(&service_id).await {
-                Ok(count) => {
-                    tracing::info!("Migrated {} logs from {} to TimescaleDB", count, service_id);
-                    total_migrated += count;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to migrate logs for {}: {}", service_id, e);
-                }
-            }
-        }
-
-        Ok(total_migrated)
-    }
 
 }
 

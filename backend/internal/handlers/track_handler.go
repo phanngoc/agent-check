@@ -51,6 +51,18 @@ func (h *TrackHandler) TrackEvents(c *fiber.Ctx) error {
 	}
 
 	log.Printf("[TrackEvents] Parsed request - SessionID: %s, Events count: %d", req.SessionID, len(req.Events))
+	
+	// Count log events specifically
+	logEventCount := 0
+	for _, event := range req.Events {
+		if event.EventType == "log" {
+			logEventCount++
+		}
+	}
+	if logEventCount > 0 {
+		log.Printf("[TrackEvents] Found %d log events out of %d total events", logEventCount, len(req.Events))
+	}
+	
 	if len(req.Events) > 0 {
 		firstEvent := req.Events[0]
 		log.Printf("[TrackEvents] First event - Type: %s, PageURL: %s, Timestamp: %v (Zero: %v)", 
@@ -121,6 +133,7 @@ func (h *TrackHandler) TrackEvents(c *fiber.Ctx) error {
 	}
 
 	// Enqueue events to Redis for async processing
+	log.Printf("[TrackEvents] Enqueueing %d events to Redis queue for session %s", len(req.Events), sessionID)
 	err = h.eventQueue.Enqueue(c.Context(), sessionID, req.Events)
 	if err != nil {
 		log.Printf("[TrackEvents] Failed to queue events: %v", err)
@@ -129,7 +142,8 @@ func (h *TrackHandler) TrackEvents(c *fiber.Ctx) error {
 		})
 	}
 
-	log.Printf("[TrackEvents] Successfully queued %d events for session %s", len(req.Events), sessionID)
+	log.Printf("[TrackEvents] Successfully queued %d events for session %s (including %d log events)", 
+		len(req.Events), sessionID, logEventCount)
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"message": "Events queued successfully",
 		"count":   len(req.Events),

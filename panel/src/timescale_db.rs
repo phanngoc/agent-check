@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_postgres::{Client, NoTls};
+use uuid::Uuid;
+use serde_json::json;
 
 #[derive(Debug, Clone)]
 pub struct LogFilters {
@@ -157,6 +159,9 @@ impl TimescaleDatabase {
     }
 
     pub async fn get_combined_logs(&self, filters: LogFilters) -> Result<Vec<LogEntry>> {
+        tracing::info!("[TimescaleDB] get_combined_logs called - level: {:?}, search: {:?}, limit: {}, offset: {}", 
+            filters.level, filters.search, filters.limit, filters.offset);
+        
         let mut conditions = Vec::new();
         let mut param_values: Vec<String> = Vec::new();
         let mut param_index = 1;
@@ -217,6 +222,9 @@ impl TimescaleDatabase {
             where_clause, limit_param, offset_param
         );
 
+        tracing::debug!("[TimescaleDB] Executing query: {}", query);
+        tracing::debug!("[TimescaleDB] Query params: {:?}", param_values);
+
         // Build params array
         let limit = filters.limit as i64;
         let offset = filters.offset as i64;
@@ -247,6 +255,8 @@ impl TimescaleDatabase {
                 message: message.unwrap_or_else(|| "".to_string()),
             });
         }
+
+        tracing::info!("[TimescaleDB] Query returned {} log entries", entries.len());
 
         // No reverse - keep newest first (ORDER BY timestamp DESC)
         Ok(entries)
@@ -335,6 +345,92 @@ impl TimescaleDatabase {
         }
 
         Ok(stats)
+    }
+
+    /// Create or get panel session in TimescaleDB
+    /// Returns the session_id
+    pub async fn create_or_get_panel_session(&self) -> Result<Uuid> {
+        // Try to find existing panel session
+        let row = self.client
+            .query_opt(
+                "SELECT session_id FROM sessions WHERE user_id = 'panel' AND page_url = 'panel://logs' ORDER BY started_at DESC LIMIT 1",
+                &[]
+            )
+            .await
+            .context("Failed to query panel session")?;
+
+        if let Some(row) = row {
+            let session_id: Uuid = row.get(0);
+            tracing::debug!("[TimescaleDB] Found existing panel session: {}", session_id);
+            return Ok(session_id);
+        }
+
+        // Create new panel session
+        let session_id = Uuid::new_v4();
+        let metadata = json!({
+            "source": "panel",
+            "type": "log_collector"
+        });
+
+        self.client
+            .execute(
+                "INSERT INTO sessions (session_id, user_id, page_url, metadata) VALUES ($1, $2, $3, $4)",
+                &[&session_id, &"panel", &"panel://logs", &metadata]
+            )
+            .await
+            .context("Failed to create panel session")?;
+
+        tracing::info!("[TimescaleDB] Created new panel session: {}", session_id);
+        Ok(session_id)
+    }
+
+    /// Insert logs directly into TimescaleDB events table
+    /// Uses batch insert for performance
+    pub async fn insert_logs(&self, session_id: Uuid, entries: &[LogEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        tracing::debug!("[TimescaleDB] Inserting {} log entries for session {}", entries.len(), session_id);
+
+        // Prepare batch insert query
+        let query = "
+            INSERT INTO events (
+                session_id, timestamp, event_type, page_url, event_data
+            ) VALUES ($1, $2, $3, $4, $5)
+        ";
+
+        // Prepare statement once for better performance
+        let stmt = self.client
+            .prepare(query)
+            .await
+            .context("Failed to prepare insert statement")?;
+
+        // Insert all entries
+        for entry in entries {
+            let event_data = json!({
+                "service_id": entry.service_id,
+                "level": entry.level,
+                "message": entry.message
+            });
+
+            self.client
+                .execute(
+                    &stmt,
+                    &[
+                        &session_id,
+                        &entry.timestamp,
+                        &"log",
+                        &entry.service_id, // page_url = service_id
+                        &event_data,
+                    ]
+                )
+                .await
+                .context("Failed to insert log entry")?;
+        }
+
+        tracing::debug!("[TimescaleDB] Successfully inserted {} log entries", entries.len());
+        Ok(())
     }
 }
 

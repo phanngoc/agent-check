@@ -175,11 +175,31 @@ func (w *Worker) processMessages(ctx context.Context, consumerName string) {
 			messageIDs = append(messageIDs, msg.ID)
 		}
 
+		// Count log events
+		logEventCount := 0
+		for _, event := range allEvents {
+			if event.EventType == "log" {
+				logEventCount++
+			}
+		}
+		
+		if logEventCount > 0 {
+			log.Printf("[Worker-%d] Processing %d log events (out of %d total events) for session %s", 
+				w.id, logEventCount, len(allEvents), sessionIDStr)
+		}
+
 		// Batch insert to database
+		log.Printf("[Worker-%d] Inserting %d events (including %d log events) into TimescaleDB for session %s", 
+			w.id, len(allEvents), logEventCount, sessionIDStr)
 		if err := w.processor.eventRepo.CreateBatch(ctx, sessionID, allEvents); err != nil {
 			log.Printf("[Worker-%d] Error inserting events for session %s: %v", w.id, sessionIDStr, err)
 			// TODO: Implement retry logic or dead letter queue
 			continue
+		}
+		
+		if logEventCount > 0 {
+			log.Printf("[Worker-%d] Successfully inserted %d log events into TimescaleDB for session %s", 
+				w.id, logEventCount, sessionIDStr)
 		}
 
 		// Mark as successfully processed

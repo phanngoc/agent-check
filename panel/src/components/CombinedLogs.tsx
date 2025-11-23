@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 const getLogLevelColor = (level: string): string => {
   const normalized = level.toLowerCase();
   if (normalized === "error") return "text-destructive";
-  if (normalized === "warn") return "text-yellow-500";
+  if (normalized === "warn") return "text-amber-600";
   if (normalized === "info") return "text-primary";
   if (normalized === "debug") return "text-muted-foreground";
   return "text-foreground";

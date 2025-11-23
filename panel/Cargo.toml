@@ -25,4 +25,6 @@ tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 regex = "1"
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+reqwest = { version = "0.11", features = ["json"] }
 

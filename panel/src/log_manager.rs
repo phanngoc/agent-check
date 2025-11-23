@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
-use crate::database::{LogDatabase, LogFilters};
+use crate::database::LogDatabase;
 use crate::models::{FilteredLogsResponse, LogEntry};
+use crate::timescale_db::{TimescaleDatabase, LogFilters};
 use chrono::{DateTime, Utc};
+use reqwest::Client as HttpClient;
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -9,30 +12,42 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 pub struct LogManager {
     log_files: Arc<RwLock<HashMap<String, PathBuf>>>,
     log_senders: Arc<RwLock<HashMap<String, broadcast::Sender<LogEntry>>>>,
     log_positions: Arc<RwLock<HashMap<String, u64>>>, // Track file read positions
     logs_dir: PathBuf,
-    database: Option<Arc<LogDatabase>>,
+    database: Option<Arc<LogDatabase>>, // Keep for fallback
+    timescale_db: Option<Arc<TimescaleDatabase>>,
+    http_client: Arc<HttpClient>,
+    backend_api_url: String,
+    panel_session_id: Uuid,
+    log_batch: Arc<RwLock<Vec<LogEntry>>>, // Batch logs before sending
 }
 
 impl LogManager {
-    pub fn new(logs_dir: PathBuf, data_dir: Option<PathBuf>) -> Result<Self> {
+    pub async fn new(
+        logs_dir: PathBuf,
+        data_dir: Option<PathBuf>,
+        timescale_db_url: Option<&str>,
+        backend_api_url: &str,
+        panel_session_id: Uuid,
+    ) -> Result<Self> {
         // Create logs directory if it doesn't exist
         std::fs::create_dir_all(&logs_dir)
             .context("Failed to create logs directory")?;
 
-        // Initialize database if data_dir is provided
-        let database = if let Some(data_dir) = data_dir {
-            match LogDatabase::new(data_dir) {
+        // Initialize TimescaleDB if URL is provided
+        let timescale_db = if let Some(db_url) = timescale_db_url {
+            match TimescaleDatabase::new(db_url).await {
                 Ok(db) => {
-                    tracing::info!("SQLite database initialized successfully");
+                    tracing::info!("TimescaleDB initialized successfully");
                     Some(Arc::new(db))
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to initialize SQLite database: {}. Logs will only be stored in files.", e);
+                    tracing::warn!("Failed to initialize TimescaleDB: {}. Will use SQLite fallback.", e);
                     None
                 }
             }
@@ -40,13 +55,109 @@ impl LogManager {
             None
         };
 
+        // Initialize SQLite as fallback if TimescaleDB is not available
+        let database = if timescale_db.is_none() {
+            if let Some(data_dir) = data_dir {
+                match LogDatabase::new(data_dir) {
+                    Ok(db) => {
+                        tracing::info!("SQLite database initialized as fallback");
+                        Some(Arc::new(db))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to initialize SQLite database: {}. Logs will only be stored in files.", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None // Don't use SQLite if TimescaleDB is available
+        };
+
+        let http_client = Arc::new(HttpClient::new());
+        let log_batch = Arc::new(RwLock::new(Vec::new()));
+
+        // Start batch flush task
+        let batch_clone = log_batch.clone();
+        let client_clone = http_client.clone();
+        let api_url = backend_api_url.to_string();
+        let session_id = panel_session_id;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let mut batch = batch_clone.write().await;
+                if !batch.is_empty() {
+                    let events: Vec<_> = batch.drain(..).collect();
+                    drop(batch);
+                    if let Err(e) = Self::send_logs_to_api(&client_clone, &api_url, session_id, &events).await {
+                        tracing::warn!("Failed to send log batch to API: {}", e);
+                        // Re-add events to batch on failure (optional, might cause duplicates)
+                    }
+                }
+            }
+        });
+
         Ok(Self {
             log_files: Arc::new(RwLock::new(HashMap::new())),
             log_senders: Arc::new(RwLock::new(HashMap::new())),
             log_positions: Arc::new(RwLock::new(HashMap::new())),
             logs_dir,
             database,
+            timescale_db,
+            http_client,
+            backend_api_url: backend_api_url.to_string(),
+            panel_session_id,
+            log_batch,
         })
+    }
+
+    async fn send_logs_to_api(
+        client: &HttpClient,
+        api_url: &str,
+        session_id: Uuid,
+        entries: &[LogEntry],
+    ) -> Result<()> {
+        let events: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|entry| {
+                json!({
+                    "timestamp": entry.timestamp.to_rfc3339(),
+                    "event_type": "log",
+                    "page_url": entry.service_id,
+                    "event_data": {
+                        "service_id": entry.service_id,
+                        "level": entry.level,
+                        "message": entry.message
+                    }
+                })
+            })
+            .collect();
+
+        let payload = json!({
+            "session_id": session_id.to_string(),
+            "events": events
+        });
+
+        let response = client
+            .post(&format!("{}/track", api_url))
+            .json(&payload)
+            .send()
+            .await
+            .context("Failed to send request to backend API")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Backend API returned error: {} - {}",
+                status,
+                text
+            ));
+        }
+
+        Ok(())
     }
 
     pub async fn register_service(&self, service_id: String) -> Result<()> {
@@ -73,7 +184,7 @@ impl LogManager {
     async fn start_log_watcher(&self, service_id: String, log_path: PathBuf) {
         let log_senders = self.log_senders.clone();
         let log_positions = self.log_positions.clone();
-        let database = self.database.clone();
+        let log_batch = self.log_batch.clone();
 
         tokio::spawn(async move {
             let mut last_position = 0u64;
@@ -111,7 +222,7 @@ impl LogManager {
                                 if file.seek(SeekFrom::Start(0)).is_err() {
                                     continue;
                                 }
-                                last_position = 0;
+                                // Position will be updated to current_size below
                             }
 
                             let reader = BufReader::new(&mut file);
@@ -129,7 +240,7 @@ impl LogManager {
                             last_position = current_size;
                             log_positions.write().await.insert(service_id.clone(), last_position);
 
-                            // Process new lines: broadcast and store in database
+                            // Process new lines: broadcast and add to batch for API
                             for line in new_lines {
                                 let (level, timestamp) = Self::parse_log_line(&line);
                                 let entry = LogEntry {
@@ -142,16 +253,9 @@ impl LogManager {
                                 // Broadcast for realtime streaming
                                 let _ = sender.send(entry.clone());
 
-                                // Store in SQLite database (non-blocking, fire-and-forget)
-                                if let Some(db) = &database {
-                                    let db_clone = db.clone();
-                                    let entry_clone = entry.clone();
-                                    tokio::spawn(async move {
-                                        if let Err(e) = db_clone.insert_log(&entry_clone).await {
-                                            tracing::debug!("Failed to insert log into database: {}", e);
-                                        }
-                                    });
-                                }
+                                // Add to batch for sending to backend API
+                                let mut batch = log_batch.write().await;
+                                batch.push(entry);
                             }
                         }
                     }
@@ -278,9 +382,29 @@ impl LogManager {
         use_or_operator: bool,
         limit: usize,
     ) -> Result<FilteredLogsResponse> {
-        // Try to use database first, fallback to file if database is not available
-        if let Some(db) = &self.database {
+        // Try to use TimescaleDB first, fallback to SQLite, then file
+        if let Some(timescale_db) = &self.timescale_db {
             let filters = LogFilters {
+                service_id: Some(service_id.to_string()),
+                level: level_filter.map(|s| s.to_string()),
+                from,
+                to,
+                search: search.map(|s| s.to_string()),
+                limit,
+                offset: 0,
+            };
+
+            let entries = timescale_db.get_logs(filters).await?;
+            let total = timescale_db.get_log_count(Some(service_id)).await.unwrap_or(0);
+            let filtered = entries.len();
+
+            Ok(FilteredLogsResponse {
+                logs: entries,
+                total,
+                filtered,
+            })
+        } else if let Some(db) = &self.database {
+            let filters = crate::database::LogFilters {
                 service_id: Some(service_id.to_string()),
                 level: level_filter.map(|s| s.to_string()),
                 from,
@@ -292,10 +416,6 @@ impl LogManager {
 
             let entries = db.get_logs(filters).await?;
             let total = db.get_log_count(Some(service_id)).await.unwrap_or(0);
-
-            // Note: SQLite query already applies AND logic for all filters
-            // For OR operator, we would need to query separately and combine, but for simplicity
-            // we'll use AND logic (which is more common for log filtering)
             let filtered = entries.len();
 
             Ok(FilteredLogsResponse {
@@ -393,10 +513,31 @@ impl LogManager {
         search: Option<&str>,
         lines: Option<usize>,
     ) -> Result<FilteredLogsResponse> {
-        // Try to use database first, fallback to file if database is not available
-        if let Some(db) = &self.database {
+        // Try to use TimescaleDB first, fallback to SQLite, then file
+        if let Some(timescale_db) = &self.timescale_db {
             let limit = lines.unwrap_or(1000);
             let filters = LogFilters {
+                service_id: None, // None means all services
+                level: level_filter.map(|s| s.to_string()),
+                from: None,
+                to: None,
+                search: search.map(|s| s.to_string()),
+                limit,
+                offset: 0,
+            };
+
+            let entries = timescale_db.get_combined_logs(filters).await?;
+            let total = timescale_db.get_log_count(None).await.unwrap_or(0);
+            let filtered = entries.len();
+
+            Ok(FilteredLogsResponse {
+                logs: entries,
+                total,
+                filtered,
+            })
+        } else if let Some(db) = &self.database {
+            let limit = lines.unwrap_or(1000);
+            let filters = crate::database::LogFilters {
                 service_id: None, // None means all services
                 level: level_filter.map(|s| s.to_string()),
                 from: None,
@@ -488,21 +629,18 @@ impl LogManager {
             .collect()
     }
 
-    /// Get database reference (if available)
+    /// Get database reference (if available) - for backward compatibility
     pub fn get_database(&self) -> Option<Arc<LogDatabase>> {
         self.database.clone()
     }
 
-    /// Migrate logs from file to database for a specific service
-    pub async fn migrate_file_logs_to_db(&self, service_id: &str) -> Result<usize> {
-        let database = match &self.database {
-            Some(db) => db.clone(),
-            None => {
-                tracing::warn!("Database not available, skipping migration for {}", service_id);
-                return Ok(0);
-            }
-        };
+    /// Get TimescaleDB reference (if available)
+    pub fn get_timescale_db(&self) -> Option<Arc<TimescaleDatabase>> {
+        self.timescale_db.clone()
+    }
 
+    /// Migrate logs from file to TimescaleDB via API for a specific service
+    pub async fn migrate_file_logs_to_timescale(&self, service_id: &str) -> Result<usize> {
         let log_path = {
             let log_files = self.log_files.read().await;
             log_files.get(service_id)
@@ -536,21 +674,24 @@ impl LogManager {
             }
         }).collect();
 
-        // Batch insert into database
-        database.insert_logs_batch(&entries).await?;
+        // Send to backend API in batches
+        let batch_size = 100;
+        for chunk in entries.chunks(batch_size) {
+            Self::send_logs_to_api(&self.http_client, &self.backend_api_url, self.panel_session_id, chunk).await?;
+        }
 
         Ok(entries.len())
     }
 
-    /// Migrate logs from all registered services
-    pub async fn migrate_all_file_logs_to_db(&self) -> Result<usize> {
+    /// Migrate logs from all registered services to TimescaleDB
+    pub async fn migrate_all_file_logs_to_timescale(&self) -> Result<usize> {
         let service_ids = self.get_service_ids().await;
         let mut total_migrated = 0;
 
         for service_id in service_ids {
-            match self.migrate_file_logs_to_db(&service_id).await {
+            match self.migrate_file_logs_to_timescale(&service_id).await {
                 Ok(count) => {
-                    tracing::info!("Migrated {} logs from {} to database", count, service_id);
+                    tracing::info!("Migrated {} logs from {} to TimescaleDB", count, service_id);
                     total_migrated += count;
                 }
                 Err(e) => {

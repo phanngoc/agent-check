@@ -22,7 +22,7 @@ use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
 };
-use axum::response::{Html, Response};
+use axum::response::Html;
 use std::fs;
 use tracing::{info, error, debug, warn};
 use futures::Stream;
@@ -56,8 +56,57 @@ pub async fn start_server(config: Config) -> Result<()> {
         DockerManager::new().await.context("Failed to initialize Docker manager")?
     );
     
+    // Ensure panel_session_id exists
+    let panel_session_id = config.panel_session_id.unwrap_or_else(|| {
+        let id = uuid::Uuid::new_v4();
+        info!("Generated new panel_session_id: {}", id);
+        id
+    });
+
+    // Create panel session in backend if needed
+    let backend_api_url = config.backend_api_url.clone();
+    let session_id_for_api = panel_session_id;
+    tokio::spawn(async move {
+        // Try to create panel session in backend
+        let client = reqwest::Client::new();
+        let session_req = serde_json::json!({
+            "user_id": "panel",
+            "page_url": "panel://logs",
+            "metadata": {
+                "source": "panel",
+                "type": "log_collector"
+            }
+        });
+
+        match client
+            .post(&format!("{}/sessions", backend_api_url))
+            .json(&session_req)
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    info!("Panel session created/verified in backend");
+                } else {
+                    warn!("Failed to create panel session in backend: {}", resp.status());
+                }
+            }
+            Err(e) => {
+                warn!("Failed to connect to backend to create session: {}", e);
+            }
+        }
+    });
+
     let log_manager = Arc::new(
-        LogManager::new(logs_dir.clone(), Some(config.data_dir.clone())).context("Failed to initialize log manager")?
+        LogManager::new(
+            logs_dir.clone(),
+            Some(config.data_dir.clone()),
+            Some(&config.timescale_db_url),
+            &config.backend_api_url,
+            panel_session_id,
+        )
+        .await
+        .context("Failed to initialize log manager")?
     );
     
     // Determine static files path
@@ -80,23 +129,24 @@ pub async fn start_server(config: Config) -> Result<()> {
         let _ = log_manager.register_service(service.id.clone()).await;
     }
 
-    // Background task: Migrate existing logs to database (non-blocking)
+    // Background task: Migrate existing logs to TimescaleDB (non-blocking)
     let log_manager_clone = log_manager.clone();
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await; // Wait 5 seconds after startup
-        match log_manager_clone.migrate_all_file_logs_to_db().await {
+        match log_manager_clone.migrate_all_file_logs_to_timescale().await {
             Ok(count) => {
                 if count > 0 {
-                    info!("Migrated {} log entries from files to database", count);
+                    info!("Migrated {} log entries from files to TimescaleDB", count);
                 }
             }
             Err(e) => {
-                warn!("Failed to migrate logs to database: {}", e);
+                warn!("Failed to migrate logs to TimescaleDB: {}", e);
             }
         }
     });
 
     // Background task: Cleanup old logs (run daily)
+    // Note: TimescaleDB has its own retention policy, so we only cleanup SQLite if used
     let log_manager_cleanup = log_manager.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(86400)); // 24 hours
@@ -104,17 +154,23 @@ pub async fn start_server(config: Config) -> Result<()> {
         
         loop {
             interval.tick().await;
-            if let Some(db) = log_manager_cleanup.get_database() {
-                match db.cleanup_old_logs(30).await {
-                    Ok(deleted) => {
-                        if deleted > 0 {
-                            info!("Cleaned up {} old log entries (older than 30 days)", deleted);
+            // Only cleanup SQLite if TimescaleDB is not available
+            if log_manager_cleanup.get_timescale_db().is_none() {
+                if let Some(db) = log_manager_cleanup.get_database() {
+                    match db.cleanup_old_logs(30).await {
+                        Ok(deleted) => {
+                            if deleted > 0 {
+                                info!("Cleaned up {} old log entries from SQLite (older than 30 days)", deleted);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to cleanup old logs: {}", e);
                         }
                     }
-                    Err(e) => {
-                        warn!("Failed to cleanup old logs: {}", e);
-                    }
                 }
+            } else {
+                // TimescaleDB has retention policy, no manual cleanup needed
+                debug!("TimescaleDB retention policy handles cleanup automatically");
             }
         }
     });
@@ -686,18 +742,22 @@ async fn cleanup_logs(
 async fn get_log_stats(
     State(state): State<AppState>,
 ) -> Result<Json<HashMap<String, usize>>, StatusCode> {
-    let database = match state.log_manager.get_database() {
-        Some(db) => db,
-        None => {
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
+    // Try TimescaleDB first, fallback to SQLite
+    let stats = if let Some(timescale_db) = state.log_manager.get_timescale_db() {
+        timescale_db.get_log_stats().await
+            .map_err(|e| {
+                error!("Failed to get log stats from TimescaleDB: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    } else if let Some(database) = state.log_manager.get_database() {
+        database.get_log_stats().await
+            .map_err(|e| {
+                error!("Failed to get log stats from SQLite: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+    } else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
-
-    let stats = database.get_log_stats().await
-        .map_err(|e| {
-            error!("Failed to get log stats: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
 
     Ok(Json(stats))
 }

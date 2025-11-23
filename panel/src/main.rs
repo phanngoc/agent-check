@@ -8,6 +8,7 @@ mod process_manager;
 mod server;
 mod service_detector;
 mod state_persistence;
+mod timescale_db;
 
 use anyhow::Result;
 use crate::config::Config;

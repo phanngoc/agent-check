@@ -437,8 +437,8 @@ impl LogManager {
 
             let total = all_entries.len();
 
-            // Sort by timestamp (oldest first)
-            all_entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+            // Sort by timestamp (newest first)
+            all_entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
             // Apply filters
             let filtered_entries: Vec<LogEntry> = all_entries.into_iter().filter(|entry| {
@@ -461,10 +461,10 @@ impl LogManager {
                 matches
             }).collect();
 
-            // Get last N lines if specified
+            // Get first N lines if specified (newest first)
             let logs = if let Some(n) = lines {
-                let start = filtered_entries.len().saturating_sub(n);
-                filtered_entries[start..].to_vec()
+                let end = n.min(filtered_entries.len());
+                filtered_entries[..end].to_vec()
             } else {
                 filtered_entries
             };

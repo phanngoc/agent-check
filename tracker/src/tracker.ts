@@ -55,6 +55,8 @@ class UserTracker {
   private bugReportPopup: HTMLElement | null = null;
   private bugReportOverlay: HTMLElement | null = null;
   private isBugReportInitialized: boolean = false;
+  private currentScreenshot: string | null = null;
+  private selectedFiles: File[] = [];
 
   constructor() {
     this.config = {
@@ -476,6 +478,84 @@ class UserTracker {
     }
   }
 
+  // Helper function to build API endpoint URL
+  private buildApiUrl(endpoint: string): string {
+    let baseUrl = this.config.apiUrl;
+    
+    // Remove trailing slash from baseUrl
+    baseUrl = baseUrl.replace(/\/+$/, '');
+    
+    // Remove leading slash from endpoint
+    endpoint = endpoint.replace(/^\/+/, '');
+    
+    // Check if baseUrl already includes /api/v1
+    if (!baseUrl.includes('/api/v1')) {
+      // If not, add /api/v1
+      baseUrl = baseUrl.replace(/\/+$/, '') + '/api/v1';
+    }
+    
+    return `${baseUrl}/${endpoint}`;
+  }
+
+  // Helper function to sanitize CSS by removing/replacing unsupported color functions
+  private sanitizeCSS(cssText: string): string {
+    if (!cssText) return cssText;
+    
+    // Remove oklch() color functions - replace with fallback rgb or remove the property
+    // Pattern: oklch(...) or oklch(...) in any CSS property
+    let sanitized = cssText;
+    
+    // Replace oklch() with a safe fallback (transparent or inherit)
+    // This regex matches oklch(...) with any content inside
+    sanitized = sanitized.replace(/oklch\([^)]*\)/gi, 'transparent');
+    
+    // Also handle other unsupported modern color functions if needed
+    // lab(), lch(), color() with oklch, etc.
+    sanitized = sanitized.replace(/lab\([^)]*\)/gi, 'transparent');
+    sanitized = sanitized.replace(/lch\([^)]*\)/gi, 'transparent');
+    sanitized = sanitized.replace(/color\([^)]*oklch[^)]*\)/gi, 'transparent');
+    
+    return sanitized;
+  }
+
+  // Helper function to sanitize all styles in a cloned document
+  private sanitizeDocumentStyles(clonedDoc: Document): void {
+    // Sanitize all style tags
+    const styleTags = clonedDoc.querySelectorAll('style');
+    styleTags.forEach((style) => {
+      if (style.textContent) {
+        const sanitized = this.sanitizeCSS(style.textContent);
+        if (sanitized !== style.textContent) {
+          style.textContent = sanitized;
+        }
+      }
+    });
+
+    // Sanitize inline styles on all elements
+    const allElements = clonedDoc.querySelectorAll('*');
+    allElements.forEach((element) => {
+      const htmlElement = element as HTMLElement;
+      if (htmlElement.style && htmlElement.style.cssText) {
+        const sanitized = this.sanitizeCSS(htmlElement.style.cssText);
+        if (sanitized !== htmlElement.style.cssText) {
+          htmlElement.style.cssText = sanitized;
+        }
+      }
+    });
+
+    // Also check computed styles and remove problematic style attributes
+    allElements.forEach((element) => {
+      const htmlElement = element as HTMLElement;
+      if (htmlElement.hasAttribute('style')) {
+        const styleAttr = htmlElement.getAttribute('style');
+        if (styleAttr && styleAttr.includes('oklch')) {
+          const sanitized = this.sanitizeCSS(styleAttr);
+          htmlElement.setAttribute('style', sanitized);
+        }
+      }
+    });
+  }
+
   // Bug Report Popup
   private initBugReport(): void {
     if (this.isBugReportInitialized) return;
@@ -516,6 +596,17 @@ class UserTracker {
           <label for="tracker-bug-description">Description</label>
           <textarea id="tracker-bug-description" name="description" required rows="5" placeholder="Detailed description of the bug"></textarea>
         </div>
+        <div class="tracker-bug-report-field">
+          <label>Screenshot (captured automatically)</label>
+          <div class="tracker-bug-report-screenshot-preview" style="display: none;">
+            <img src="" alt="Screenshot preview" style="max-width: 100%; border-radius: 4px; border: 1px solid #d1d5db;">
+          </div>
+        </div>
+        <div class="tracker-bug-report-field">
+          <label for="tracker-bug-attachments">Attachments (optional)</label>
+          <input type="file" id="tracker-bug-attachments" name="attachments" multiple data-tracker-ignore="true">
+          <div class="tracker-bug-report-file-list" style="display: none;"></div>
+        </div>
         <div class="tracker-bug-report-actions">
           <button type="button" class="tracker-bug-report-cancel" data-tracker-ignore="true">Close</button>
           <button type="submit" class="tracker-bug-report-submit" data-tracker-ignore="true">Submit</button>
@@ -527,12 +618,20 @@ class UserTracker {
     const closeBtn = this.bugReportPopup.querySelector('.tracker-bug-report-close');
     const cancelBtn = this.bugReportPopup.querySelector('.tracker-bug-report-cancel');
     const form = this.bugReportPopup.querySelector('.tracker-bug-report-form') as HTMLFormElement;
+    const fileInput = this.bugReportPopup.querySelector('#tracker-bug-attachments') as HTMLInputElement;
 
     closeBtn?.addEventListener('click', () => this.closeBugReportPopup());
     cancelBtn?.addEventListener('click', () => this.closeBugReportPopup());
     form?.addEventListener('submit', (e) => {
       e.preventDefault();
       this.handleBugReportSubmit(form);
+    });
+    fileInput?.addEventListener('change', (e) => {
+      const target = e.target as HTMLInputElement;
+      if (target.files) {
+        this.selectedFiles = Array.from(target.files);
+        this.updateFileListDisplay();
+      }
     });
 
     document.body.appendChild(this.bugReportPopup);
@@ -691,6 +790,84 @@ class UserTracker {
         background-color: #9ca3af;
         cursor: not-allowed;
       }
+      .tracker-bug-report-screenshot-preview {
+        margin-top: 8px;
+        padding: 8px;
+        background-color: #f9fafb;
+        border-radius: 6px;
+        border: 1px solid #e5e7eb;
+      }
+      .tracker-bug-report-screenshot-preview img {
+        max-width: 100%;
+        height: auto;
+        border-radius: 4px;
+      }
+      .tracker-bug-report-field input[type="file"] {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      .tracker-bug-report-file-list {
+        margin-top: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .tracker-bug-report-file-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px;
+        background-color: #f9fafb;
+        border-radius: 6px;
+        border: 1px solid #e5e7eb;
+      }
+      .tracker-bug-report-file-preview {
+        width: 40px;
+        height: 40px;
+        object-fit: cover;
+        border-radius: 4px;
+      }
+      .tracker-bug-report-file-icon {
+        font-size: 24px;
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .tracker-bug-report-file-name {
+        flex: 1;
+        font-size: 14px;
+        color: #374151;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .tracker-bug-report-file-size {
+        font-size: 12px;
+        color: #6b7280;
+      }
+      .tracker-bug-report-file-remove {
+        background: none;
+        border: none;
+        color: #ef4444;
+        font-size: 20px;
+        cursor: pointer;
+        padding: 0;
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
+      }
+      .tracker-bug-report-file-remove:hover {
+        color: #dc2626;
+      }
       @media (max-width: 480px) {
         .tracker-bug-report-popup {
           bottom: 20px;
@@ -718,11 +895,17 @@ class UserTracker {
     if (this.bugReportPopup && this.bugReportOverlay) {
       this.bugReportPopup.classList.add('show');
       this.bugReportOverlay.classList.add('show');
-      // Reset form
+      // Reset form and state
       const form = this.bugReportPopup.querySelector('.tracker-bug-report-form') as HTMLFormElement;
       if (form) {
         form.reset();
       }
+      this.selectedFiles = [];
+      this.currentScreenshot = null;
+      // Capture screenshot
+      this.captureScreenshotForBugReport();
+      // Update file list display
+      this.updateFileListDisplay();
     }
   }
 
@@ -730,7 +913,160 @@ class UserTracker {
     if (this.bugReportPopup && this.bugReportOverlay) {
       this.bugReportPopup.classList.remove('show');
       this.bugReportOverlay.classList.remove('show');
+      // Clear state
+      this.currentScreenshot = null;
+      this.selectedFiles = [];
     }
+  }
+
+  private async captureScreenshotForBugReport(): Promise<void> {
+    if (this.isCapturingScreenshot) return;
+
+    this.isCapturingScreenshot = true;
+    try {
+      // First, try to capture with comprehensive oklch sanitization
+      const canvas = await html2canvas(document.body, {
+        allowTaint: true,
+        useCORS: true,
+        logging: false,
+        width: window.innerWidth,
+        height: window.innerHeight,
+        backgroundColor: '#ffffff',
+        onclone: (clonedDoc) => {
+          // Comprehensive CSS sanitization
+          this.sanitizeDocumentStyles(clonedDoc);
+        },
+        foreignObjectRendering: false,
+      });
+
+      this.currentScreenshot = canvas.toDataURL('image/jpeg', this.config.screenshotQuality);
+      this.updateScreenshotPreview();
+      this.log('Screenshot captured for bug report');
+    } catch (error) {
+      console.error('[UserTracker] Failed to capture screenshot for bug report:', error);
+      // Fallback: try with minimal CSS parsing and sanitization
+      try {
+        const canvas = await html2canvas(document.body, {
+          allowTaint: true,
+          useCORS: false,
+          logging: false,
+          width: window.innerWidth,
+          height: window.innerHeight,
+          foreignObjectRendering: false,
+          backgroundColor: '#ffffff',
+          onclone: (clonedDoc) => {
+            // Still sanitize even in fallback
+            this.sanitizeDocumentStyles(clonedDoc);
+          },
+        });
+        this.currentScreenshot = canvas.toDataURL('image/jpeg', this.config.screenshotQuality);
+        this.updateScreenshotPreview();
+        this.log('Screenshot captured for bug report (fallback)');
+      } catch (fallbackError) {
+        console.error('[UserTracker] Fallback screenshot capture also failed:', fallbackError);
+        // Last resort: capture only viewport with very basic options and sanitization
+        try {
+          const canvas = await html2canvas(document.documentElement, {
+            allowTaint: false,
+            useCORS: false,
+            logging: false,
+            width: window.innerWidth,
+            height: window.innerHeight,
+            foreignObjectRendering: false,
+            backgroundColor: '#ffffff',
+            scale: 1,
+            onclone: (clonedDoc) => {
+              // Sanitize in last resort attempt too
+              this.sanitizeDocumentStyles(clonedDoc);
+            },
+          });
+          this.currentScreenshot = canvas.toDataURL('image/jpeg', this.config.screenshotQuality);
+          this.updateScreenshotPreview();
+          this.log('Screenshot captured for bug report (viewport only)');
+        } catch (lastError) {
+          console.error('[UserTracker] All screenshot capture methods failed:', lastError);
+          // Set a placeholder or empty screenshot
+          this.currentScreenshot = null;
+        }
+      }
+    } finally {
+      this.isCapturingScreenshot = false;
+    }
+  }
+
+  private updateScreenshotPreview(): void {
+    const preview = this.bugReportPopup?.querySelector('.tracker-bug-report-screenshot-preview') as HTMLElement;
+    if (preview && this.currentScreenshot) {
+      const img = preview.querySelector('img') as HTMLImageElement;
+      if (img) {
+        img.src = this.currentScreenshot;
+        preview.style.display = 'block';
+      }
+    } else if (preview) {
+      preview.style.display = 'none';
+    }
+  }
+
+  private updateFileListDisplay(): void {
+    const fileList = this.bugReportPopup?.querySelector('.tracker-bug-report-file-list') as HTMLElement;
+    if (!fileList) return;
+
+    fileList.innerHTML = '';
+    if (this.selectedFiles.length === 0) {
+      fileList.style.display = 'none';
+      return;
+    }
+
+    fileList.style.display = 'block';
+    this.selectedFiles.forEach((file, index) => {
+      const fileItem = document.createElement('div');
+      fileItem.className = 'tracker-bug-report-file-item';
+      
+      const isImage = file.type.startsWith('image/');
+      
+      if (isImage) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = document.createElement('img');
+          img.src = e.target?.result as string;
+          img.className = 'tracker-bug-report-file-preview';
+          fileItem.insertBefore(img, fileItem.firstChild);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        const icon = document.createElement('span');
+        icon.className = 'tracker-bug-report-file-icon';
+        icon.textContent = '📄';
+        fileItem.appendChild(icon);
+      }
+
+      const fileName = document.createElement('span');
+      fileName.className = 'tracker-bug-report-file-name';
+      fileName.textContent = file.name;
+      fileItem.appendChild(fileName);
+
+      const fileSize = document.createElement('span');
+      fileSize.className = 'tracker-bug-report-file-size';
+      fileSize.textContent = `(${(file.size / 1024).toFixed(1)} KB)`;
+      fileItem.appendChild(fileSize);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'tracker-bug-report-file-remove';
+      removeBtn.textContent = '×';
+      removeBtn.setAttribute('data-tracker-ignore', 'true');
+      removeBtn.addEventListener('click', () => {
+        this.selectedFiles.splice(index, 1);
+        this.updateFileListDisplay();
+        // Reset file input
+        const fileInput = this.bugReportPopup?.querySelector('#tracker-bug-attachments') as HTMLInputElement;
+        if (fileInput) {
+          fileInput.value = '';
+        }
+      });
+      fileItem.appendChild(removeBtn);
+
+      fileList.appendChild(fileItem);
+    });
   }
 
   private async handleBugReportSubmit(form: HTMLFormElement): Promise<void> {
@@ -750,7 +1086,25 @@ class UserTracker {
     }
 
     try {
-      await this.submitBugReport(title, description);
+      // Upload screenshot if available
+      let screenshotId: number | null = null;
+      if (this.currentScreenshot) {
+        screenshotId = await this.uploadScreenshotForBugReport();
+      }
+
+      // Create issue
+      const issueId = await this.createIssue(title, description, screenshotId);
+
+      // Upload attachments
+      if (this.selectedFiles.length > 0) {
+        for (const file of this.selectedFiles) {
+          await this.uploadAttachment(issueId, file);
+        }
+      }
+
+      // Still send bug report event for tracking
+      await this.submitBugReportEvent(title, description, issueId);
+
       alert('Bug report submitted successfully!');
       form.reset();
       this.closeBugReportPopup();
@@ -765,7 +1119,101 @@ class UserTracker {
     }
   }
 
-  private async submitBugReport(title: string, description: string): Promise<void> {
+  private async uploadScreenshotForBugReport(): Promise<number | null> {
+    if (!this.currentScreenshot || !this.sessionId) {
+      return null;
+    }
+
+    try {
+      const response = await fetch(`${this.config.apiUrl}/track/screenshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: this.sessionId,
+          page_url: window.location.href,
+          timestamp: new Date().toISOString(),
+          image_data: this.currentScreenshot,
+          width: window.innerWidth,
+          height: window.innerHeight,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to upload screenshot: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.screenshot_id;
+    } catch (error) {
+      console.error('[UserTracker] Failed to upload screenshot:', error);
+      return null;
+    }
+  }
+
+  private async createIssue(title: string, description: string, screenshotId: number | null): Promise<number> {
+    if (!this.sessionId) {
+      throw new Error('Session ID is not available');
+    }
+
+    const url = this.buildApiUrl('issues');
+    this.log('Creating issue at:', url);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: this.sessionId,
+        page_url: window.location.href,
+        title: title,
+        description: description,
+        screenshot_id: screenshotId,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => response.statusText);
+      this.log('Failed to create issue:', response.status, errorText);
+      throw new Error(`Failed to create issue: ${response.status} ${errorText}`);
+    }
+
+    const data = await response.json();
+    return data.data.issue_id;
+  }
+
+  private async uploadAttachment(issueId: number, file: File): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const base64Data = reader.result as string;
+          const response = await fetch(`${this.config.apiUrl}/track/attachment`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              issue_id: issueId,
+              file_data: base64Data,
+              file_name: file.name,
+              file_type: file.type || 'application/octet-stream',
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to upload attachment: ${response.statusText}`);
+          }
+
+          const data = await response.json();
+          resolve(data.attachment_id);
+        } catch (error) {
+          console.error('[UserTracker] Failed to upload attachment:', error);
+          reject(error);
+        }
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  private async submitBugReportEvent(title: string, description: string, issueId: number): Promise<void> {
     if (!this.sessionId) {
       throw new Error('Session ID is not available');
     }
@@ -777,6 +1225,7 @@ class UserTracker {
       event_data: {
         title: title,
         description: description,
+        issue_id: issueId,
       },
     };
 
@@ -791,12 +1240,12 @@ class UserTracker {
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to submit bug report: ${response.statusText}`);
+        throw new Error(`Failed to submit bug report event: ${response.statusText}`);
       }
 
-      this.log('Bug report submitted successfully');
+      this.log('Bug report event submitted successfully');
     } catch (error) {
-      console.error('[UserTracker] Failed to submit bug report:', error);
+      console.error('[UserTracker] Failed to submit bug report event:', error);
       throw error;
     }
   }

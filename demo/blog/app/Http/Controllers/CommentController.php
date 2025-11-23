@@ -30,12 +30,17 @@ class CommentController extends Controller
 
         $comment->load('user');
 
+        $userName = 'Anonymous';
+        if ($comment->user) {
+            $userName = $comment->user->full_name ?? $comment->user->name ?? 'Anonymous';
+        }
+
         return response()->json([
             'success' => true,
             'comment' => [
                 'id' => $comment->id,
                 'content' => $comment->content,
-                'user_name' => $comment->user->full_name ?? $comment->user->name,
+                'user_name' => $userName,
                 'created_at' => $comment->created_at->format('d/m/Y H:i'),
                 'created_at_human' => $comment->created_at->diffForHumans(),
             ],
@@ -51,10 +56,15 @@ class CommentController extends Controller
             ->orderBy('created_at', 'desc')
             ->get()
             ->map(function ($comment) {
+                $userName = 'Anonymous';
+                if ($comment->user) {
+                    $userName = $comment->user->full_name ?? $comment->user->name ?? 'Anonymous';
+                }
+
                 return [
                     'id' => $comment->id,
                     'content' => $comment->content,
-                    'user_name' => $comment->user->full_name ?? $comment->user->name,
+                    'user_name' => $userName,
                     'created_at' => $comment->created_at->format('d/m/Y H:i'),
                     'created_at_human' => $comment->created_at->diffForHumans(),
                 ];

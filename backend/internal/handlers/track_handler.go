@@ -14,14 +14,16 @@ import (
 )
 
 type TrackHandler struct {
-	eventQueue     *queue.EventQueue
-	screenshotRepo *repository.ScreenshotRepository
+	eventQueue      *queue.EventQueue
+	screenshotRepo  *repository.ScreenshotRepository
+	attachmentRepo  *repository.AttachmentRepository
 }
 
-func NewTrackHandler(eventQueue *queue.EventQueue, screenshotRepo *repository.ScreenshotRepository) *TrackHandler {
+func NewTrackHandler(eventQueue *queue.EventQueue, screenshotRepo *repository.ScreenshotRepository, attachmentRepo *repository.AttachmentRepository) *TrackHandler {
 	return &TrackHandler{
 		eventQueue:     eventQueue,
 		screenshotRepo: screenshotRepo,
+		attachmentRepo: attachmentRepo,
 	}
 }
 
@@ -234,5 +236,34 @@ func (h *TrackHandler) GetSessionScreenshots(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{
 		"data": screenshots,
+	})
+}
+
+func (h *TrackHandler) UploadAttachment(c *fiber.Ctx) error {
+	var req models.UploadAttachmentRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error":   "Invalid request body",
+			"details": err.Error(),
+		})
+	}
+
+	if req.IssueID == 0 || req.FileData == "" || req.FileName == "" || req.FileType == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "issue_id, file_data, file_name, and file_type are required",
+		})
+	}
+
+	attachment, err := h.attachmentRepo.Create(c.Context(), &req)
+	if err != nil {
+		log.Printf("Failed to save attachment: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to save attachment",
+		})
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"message":       "Attachment uploaded successfully",
+		"attachment_id": attachment.AttachmentID,
 	})
 }

@@ -250,10 +250,79 @@ impl LogDatabase {
     }
 
     pub async fn get_combined_logs(&self, filters: LogFilters) -> Result<Vec<LogEntry>> {
-        // For combined logs, we just ignore service_id filter if it exists
-        let mut combined_filters = filters;
-        combined_filters.service_id = None;
-        self.get_logs(combined_filters).await
+        let conn = self.connection.clone();
+        let filters_clone = filters.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let mut conditions = Vec::new();
+            let mut query_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+            // Build WHERE conditions (ignore service_id for combined logs)
+            if let Some(level) = &filters_clone.level {
+                if level.to_lowercase() != "all" {
+                    conditions.push("level = ?");
+                    query_params.push(Box::new(level.to_lowercase()));
+                }
+            }
+
+            if let Some(from) = &filters_clone.from {
+                conditions.push("timestamp >= ?");
+                query_params.push(Box::new(from.to_rfc3339()));
+            }
+
+            if let Some(to) = &filters_clone.to {
+                conditions.push("timestamp <= ?");
+                query_params.push(Box::new(to.to_rfc3339()));
+            }
+
+            if let Some(search) = &filters_clone.search {
+                if !search.is_empty() {
+                    conditions.push("message LIKE ?");
+                    let search_pattern = format!("%{}%", search);
+                    query_params.push(Box::new(search_pattern));
+                }
+            }
+
+            let where_clause = if conditions.is_empty() {
+                "".to_string()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            };
+
+            // ORDER BY timestamp DESC to get newest first, no reverse needed
+            let query = format!(
+                "SELECT timestamp, service_id, level, message FROM logs {} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                where_clause
+            );
+
+            // Execute query with params
+            let mut stmt = conn.prepare(&query)
+                .context("Failed to prepare query")?;
+
+            // Build params array for query
+            let limit_val = filters_clone.limit as i64;
+            let offset_val = filters_clone.offset as i64;
+            let mut params_array: Vec<&dyn rusqlite::ToSql> = Vec::new();
+            for param in &query_params {
+                params_array.push(param.as_ref());
+            }
+            params_array.push(&limit_val);
+            params_array.push(&offset_val);
+
+            let mut rows = stmt.query(params_array.as_slice())
+                .context("Failed to execute query")?;
+
+            let mut entries = Vec::new();
+            while let Some(row) = rows.next()? {
+                entries.push(Self::row_to_log_entry(row)?);
+            }
+
+            // No reverse - keep newest first (ORDER BY timestamp DESC)
+            Ok(entries)
+        })
+        .await
+        .context("Failed to execute get_combined_logs task")?
     }
 
     pub async fn cleanup_old_logs(&self, days: u32) -> Result<usize> {

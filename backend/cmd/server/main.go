@@ -112,6 +112,8 @@ func main() {
 	sessionRepo := repository.NewSessionRepository(db)
 	eventRepo := repository.NewEventRepository(db)
 	screenshotRepo := repository.NewScreenshotRepository(db)
+	issueRepo := repository.NewIssueRepository(db)
+	attachmentRepo := repository.NewAttachmentRepository(db)
 	log.Printf("[DEBUG] Repositories initialized")
 
 	// Initialize event queue
@@ -159,7 +161,8 @@ func main() {
 	// Initialize handlers
 	log.Printf("[DEBUG] Initializing handlers...")
 	sessionHandler := handlers.NewSessionHandler(sessionRepo, eventRepo)
-	trackHandler := handlers.NewTrackHandler(eventQueue, screenshotRepo)
+	trackHandler := handlers.NewTrackHandler(eventQueue, screenshotRepo, attachmentRepo)
+	issueHandler := handlers.NewIssueHandler(issueRepo, attachmentRepo)
 	log.Printf("[DEBUG] Handlers initialized")
 
 	// Initialize Fiber app
@@ -231,6 +234,16 @@ func main() {
 	track.Post("/", trackHandler.TrackEvents)
 	track.Post("/screenshot", trackHandler.UploadScreenshot)
 	track.Get("/screenshot/:id", trackHandler.GetScreenshot)
+	track.Post("/attachment", trackHandler.UploadAttachment)
+
+	// Issue routes
+	issues := v1.Group("/issues")
+	issues.Post("/", issueHandler.CreateIssue)
+	issues.Get("/", issueHandler.ListIssues)
+	issues.Get("/:id", issueHandler.GetIssue)
+	issues.Patch("/:id/status", issueHandler.UpdateIssueStatus)
+	issues.Get("/:id/attachments", issueHandler.GetIssueAttachments)
+	sessions.Get("/:id/issues", issueHandler.GetIssuesBySession)
 
 	// Start server in goroutine
 	addr := fmt.Sprintf("%s:%s", host, port)

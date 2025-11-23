@@ -16,6 +16,32 @@ const getLogLevelColor = (level: string): string => {
   return "text-foreground";
 };
 
+// Color palette for different services
+const SERVICE_COLORS = [
+  { bg: "bg-blue-500", text: "text-white", border: "border-blue-500" },
+  { bg: "bg-green-500", text: "text-white", border: "border-green-500" },
+  { bg: "bg-purple-500", text: "text-white", border: "border-purple-500" },
+  { bg: "bg-orange-500", text: "text-white", border: "border-orange-500" },
+  { bg: "bg-pink-500", text: "text-white", border: "border-pink-500" },
+  { bg: "bg-cyan-500", text: "text-white", border: "border-cyan-500" },
+  { bg: "bg-indigo-500", text: "text-white", border: "border-indigo-500" },
+  { bg: "bg-teal-500", text: "text-white", border: "border-teal-500" },
+  { bg: "bg-red-500", text: "text-white", border: "border-red-500" },
+  { bg: "bg-yellow-500", text: "text-black", border: "border-yellow-500" },
+  { bg: "bg-emerald-500", text: "text-white", border: "border-emerald-500" },
+  { bg: "bg-violet-500", text: "text-white", border: "border-violet-500" },
+];
+
+// Hash function to get consistent color for a service_id
+const getServiceColor = (serviceId: string): typeof SERVICE_COLORS[0] => {
+  let hash = 0;
+  for (let i = 0; i < serviceId.length; i++) {
+    hash = serviceId.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const index = Math.abs(hash) % SERVICE_COLORS.length;
+  return SERVICE_COLORS[index];
+};
+
 export const CombinedLogs: Component = () => {
   const [collapsed, setCollapsed] = createSignal(false);
   const [level, setLevel] = createSignal<string>("all");
@@ -217,15 +243,21 @@ export const CombinedLogs: Component = () => {
               {(log) => {
                 const timestamp = new Date(log.timestamp).toLocaleString();
                 const serviceName = getServiceName(log.service_id);
+                const serviceColor = getServiceColor(log.service_id);
                 return (
                   <div
                     class={cn(
-                      "flex gap-2 py-1 border-b border-border/50 items-start",
-                      getLogLevelColor(log.level)
+                      "flex gap-2 py-1 border-b border-border/50 items-start border-l-4",
+                      getLogLevelColor(log.level),
+                      serviceColor.border
                     )}
                   >
                     <span class="text-muted-foreground min-w-[150px]">[{timestamp}]</span>
-                    <span class="bg-primary text-primary-foreground px-2 py-0.5 rounded text-xs font-semibold min-w-[80px] text-center">
+                    <span class={cn(
+                      "px-2 py-0.5 rounded text-xs font-semibold min-w-[80px] text-center",
+                      serviceColor.bg,
+                      serviceColor.text
+                    )}>
                       {serviceName}
                     </span>
                     <span class="font-semibold min-w-[50px]">[{log.level.toUpperCase()}]</span>

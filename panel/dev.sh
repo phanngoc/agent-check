@@ -41,6 +41,29 @@ else
     fi
 fi
 
+# Function to kill process on a port
+kill_port() {
+    local port=$1
+    if [ -z "$port" ]; then
+        port=9000  # Default port
+    fi
+    
+    echo -e "${YELLOW}🔍 Checking for process on port ${port}...${NC}"
+    
+    # Find and kill process on the port (works on macOS and Linux)
+    if lsof -ti:$port > /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  Found process on port ${port}, killing it...${NC}"
+        lsof -ti:$port | xargs kill -9 2>/dev/null || true
+        sleep 1
+        echo -e "${GREEN}✅ Port ${port} is now free${NC}"
+    else
+        echo -e "${GREEN}✅ Port ${port} is already free${NC}"
+    fi
+}
+
+# Kill port before starting
+kill_port 9000
+
 echo -e "${GREEN}🚀 Starting Rust Panel...${NC}"
 echo -e "${CYAN}========================================${NC}"
 

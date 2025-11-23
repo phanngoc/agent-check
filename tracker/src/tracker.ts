@@ -51,6 +51,10 @@ class UserTracker {
   private lastMouseMove: number = 0;
   private lastPageUrl: string = '';
   private isCapturingScreenshot: boolean = false;
+  private bugReportButton: HTMLElement | null = null;
+  private bugReportPopup: HTMLElement | null = null;
+  private bugReportOverlay: HTMLElement | null = null;
+  private isBugReportInitialized: boolean = false;
 
   constructor() {
     this.config = {
@@ -110,6 +114,7 @@ class UserTracker {
       this.log('Session created:', this.sessionId);
 
       this.startTracking();
+      this.initBugReport();
     } catch (error) {
       console.error('[UserTracker] Failed to create session:', error);
     }
@@ -468,6 +473,331 @@ class UserTracker {
   private log(...args: any[]): void {
     if (this.config.debug) {
       console.log('[UserTracker]', ...args);
+    }
+  }
+
+  // Bug Report Popup
+  private initBugReport(): void {
+    if (this.isBugReportInitialized) return;
+    this.isBugReportInitialized = true;
+
+    // Inject CSS styles
+    this.injectBugReportStyles();
+
+    // Create floating button
+    this.bugReportButton = document.createElement('button');
+    this.bugReportButton.setAttribute('data-tracker-ignore', 'true');
+    this.bugReportButton.className = 'tracker-bug-report-btn';
+    this.bugReportButton.innerHTML = '🐛';
+    this.bugReportButton.title = 'Report Bug';
+    this.bugReportButton.addEventListener('click', () => this.toggleBugReportPopup());
+    document.body.appendChild(this.bugReportButton);
+
+    // Create overlay
+    this.bugReportOverlay = document.createElement('div');
+    this.bugReportOverlay.className = 'tracker-bug-report-overlay';
+    this.bugReportOverlay.addEventListener('click', () => this.closeBugReportPopup());
+    document.body.appendChild(this.bugReportOverlay);
+
+    // Create popup
+    this.bugReportPopup = document.createElement('div');
+    this.bugReportPopup.className = 'tracker-bug-report-popup';
+    this.bugReportPopup.innerHTML = `
+      <div class="tracker-bug-report-header">
+        <h3>Report Bug</h3>
+        <button class="tracker-bug-report-close" data-tracker-ignore="true">×</button>
+      </div>
+      <form class="tracker-bug-report-form" data-tracker-ignore="true">
+        <div class="tracker-bug-report-field">
+          <label for="tracker-bug-title">Title</label>
+          <input type="text" id="tracker-bug-title" name="title" required placeholder="Brief description of the bug">
+        </div>
+        <div class="tracker-bug-report-field">
+          <label for="tracker-bug-description">Description</label>
+          <textarea id="tracker-bug-description" name="description" required rows="5" placeholder="Detailed description of the bug"></textarea>
+        </div>
+        <div class="tracker-bug-report-actions">
+          <button type="button" class="tracker-bug-report-cancel" data-tracker-ignore="true">Close</button>
+          <button type="submit" class="tracker-bug-report-submit" data-tracker-ignore="true">Submit</button>
+        </div>
+      </form>
+    `;
+
+    // Add event listeners
+    const closeBtn = this.bugReportPopup.querySelector('.tracker-bug-report-close');
+    const cancelBtn = this.bugReportPopup.querySelector('.tracker-bug-report-cancel');
+    const form = this.bugReportPopup.querySelector('.tracker-bug-report-form') as HTMLFormElement;
+
+    closeBtn?.addEventListener('click', () => this.closeBugReportPopup());
+    cancelBtn?.addEventListener('click', () => this.closeBugReportPopup());
+    form?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.handleBugReportSubmit(form);
+    });
+
+    document.body.appendChild(this.bugReportPopup);
+    this.closeBugReportPopup(); // Initially hidden
+  }
+
+  private injectBugReportStyles(): void {
+    const style = document.createElement('style');
+    style.textContent = `
+      .tracker-bug-report-btn {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        background-color: #ef4444;
+        color: white;
+        border: none;
+        cursor: pointer;
+        font-size: 24px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        z-index: 9998;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: transform 0.2s, box-shadow 0.2s;
+      }
+      .tracker-bug-report-btn:hover {
+        transform: scale(1.1);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
+      }
+      .tracker-bug-report-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: rgba(0, 0, 0, 0.5);
+        z-index: 9999;
+        display: none;
+      }
+      .tracker-bug-report-overlay.show {
+        display: block;
+      }
+      .tracker-bug-report-popup {
+        position: fixed;
+        bottom: 90px;
+        right: 20px;
+        width: 400px;
+        max-width: calc(100vw - 40px);
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        z-index: 10000;
+        display: none;
+        max-height: calc(100vh - 120px);
+        overflow-y: auto;
+      }
+      .tracker-bug-report-popup.show {
+        display: block;
+      }
+      .tracker-bug-report-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 16px 20px;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .tracker-bug-report-header h3 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+        color: #111827;
+      }
+      .tracker-bug-report-close {
+        background: none;
+        border: none;
+        font-size: 24px;
+        color: #6b7280;
+        cursor: pointer;
+        padding: 0;
+        width: 24px;
+        height: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
+      }
+      .tracker-bug-report-close:hover {
+        color: #111827;
+      }
+      .tracker-bug-report-form {
+        padding: 20px;
+      }
+      .tracker-bug-report-field {
+        margin-bottom: 16px;
+      }
+      .tracker-bug-report-field label {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 14px;
+        font-weight: 500;
+        color: #374151;
+      }
+      .tracker-bug-report-field input,
+      .tracker-bug-report-field textarea {
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        font-size: 14px;
+        font-family: inherit;
+        box-sizing: border-box;
+      }
+      .tracker-bug-report-field input:focus,
+      .tracker-bug-report-field textarea:focus {
+        outline: none;
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+      }
+      .tracker-bug-report-field textarea {
+        resize: vertical;
+        min-height: 100px;
+      }
+      .tracker-bug-report-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        margin-top: 20px;
+      }
+      .tracker-bug-report-actions button {
+        padding: 8px 16px;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        border: none;
+        transition: background-color 0.2s;
+      }
+      .tracker-bug-report-cancel {
+        background-color: #f3f4f6;
+        color: #374151;
+      }
+      .tracker-bug-report-cancel:hover {
+        background-color: #e5e7eb;
+      }
+      .tracker-bug-report-submit {
+        background-color: #3b82f6;
+        color: white;
+      }
+      .tracker-bug-report-submit:hover {
+        background-color: #2563eb;
+      }
+      .tracker-bug-report-submit:disabled {
+        background-color: #9ca3af;
+        cursor: not-allowed;
+      }
+      @media (max-width: 480px) {
+        .tracker-bug-report-popup {
+          bottom: 20px;
+          right: 20px;
+          left: 20px;
+          width: auto;
+        }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  private toggleBugReportPopup(): void {
+    if (this.bugReportPopup && this.bugReportOverlay) {
+      const isOpen = this.bugReportPopup.classList.contains('show');
+      if (isOpen) {
+        this.closeBugReportPopup();
+      } else {
+        this.openBugReportPopup();
+      }
+    }
+  }
+
+  private openBugReportPopup(): void {
+    if (this.bugReportPopup && this.bugReportOverlay) {
+      this.bugReportPopup.classList.add('show');
+      this.bugReportOverlay.classList.add('show');
+      // Reset form
+      const form = this.bugReportPopup.querySelector('.tracker-bug-report-form') as HTMLFormElement;
+      if (form) {
+        form.reset();
+      }
+    }
+  }
+
+  private closeBugReportPopup(): void {
+    if (this.bugReportPopup && this.bugReportOverlay) {
+      this.bugReportPopup.classList.remove('show');
+      this.bugReportOverlay.classList.remove('show');
+    }
+  }
+
+  private async handleBugReportSubmit(form: HTMLFormElement): Promise<void> {
+    const formData = new FormData(form);
+    const title = (formData.get('title') as string)?.trim();
+    const description = (formData.get('description') as string)?.trim();
+
+    if (!title || !description) {
+      alert('Please fill in both title and description');
+      return;
+    }
+
+    const submitBtn = form.querySelector('.tracker-bug-report-submit') as HTMLButtonElement;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Submitting...';
+    }
+
+    try {
+      await this.submitBugReport(title, description);
+      alert('Bug report submitted successfully!');
+      form.reset();
+      this.closeBugReportPopup();
+    } catch (error) {
+      console.error('[UserTracker] Failed to submit bug report:', error);
+      alert('Failed to submit bug report. Please try again.');
+    } finally {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Submit';
+      }
+    }
+  }
+
+  private async submitBugReport(title: string, description: string): Promise<void> {
+    if (!this.sessionId) {
+      throw new Error('Session ID is not available');
+    }
+
+    const eventData: EventData = {
+      timestamp: new Date(),
+      event_type: 'bug_report',
+      page_url: window.location.href,
+      event_data: {
+        title: title,
+        description: description,
+      },
+    };
+
+    try {
+      const response = await fetch(`${this.config.apiUrl}/track`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: this.sessionId,
+          events: [eventData],
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to submit bug report: ${response.statusText}`);
+      }
+
+      this.log('Bug report submitted successfully');
+    } catch (error) {
+      console.error('[UserTracker] Failed to submit bug report:', error);
+      throw error;
     }
   }
 }

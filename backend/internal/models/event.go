@@ -21,6 +21,7 @@ const (
 	EventTypeSubmit     EventType = "submit"
 	EventTypeKeyPress   EventType = "keypress"
 	EventTypeError      EventType = "error"
+	EventTypeBugReport  EventType = "bug_report"
 )
 
 type Event struct {

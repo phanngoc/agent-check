@@ -1,23 +1,30 @@
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, ws::{WebSocket, WebSocketUpgrade, Message}},
     http::StatusCode,
-    response::{sse::Event, IntoResponse, Sse},
-    routing::{get, post},
+    response::{sse::Event, IntoResponse, Sse, Response},
+    routing::{get, post, delete},
     Json, Router,
 };
 use crate::config::Config;
+use crate::dev_server_manager::DevServerManager;
+use crate::claude_service::ClaudeService;
 use crate::docker_manager::DockerManager;
 use crate::log_manager::LogManager;
 use crate::metrics::MetricsCollector;
-use crate::models::{ContainerInfo, FilteredLogsResponse, LogEntry, Service, ServiceStatus};
+use crate::models::{ContainerInfo, CreateProjectRequest, FilteredLogsResponse, LogEntry, Project, Service, ServiceStatus};
 use crate::process_manager::ProcessManager;
+use crate::project_manager::ProjectManager;
+use crate::project_repository::ProjectRepository;
+use crate::project_scanner::ProjectScanner;
+use crate::schema_manager::SchemaManager;
 use crate::service_detector::ServiceDetector;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 use tower_http::{
     cors::CorsLayer,
     services::ServeDir,
@@ -35,6 +42,12 @@ pub struct AppState {
     pub log_manager: Arc<LogManager>,
     pub metrics_collector: Arc<MetricsCollector>,
     pub services: Arc<RwLock<Vec<Service>>>,
+    pub project_repository: Arc<ProjectRepository>,
+    pub schema_manager: Arc<SchemaManager>,
+    pub project_scanner: Arc<ProjectScanner>,
+    pub project_manager: Arc<ProjectManager>,
+    pub dev_server_manager: Arc<DevServerManager>,
+    pub claude_service: Arc<ClaudeService>,
     #[allow(dead_code)]
     pub project_root: PathBuf,
 }
@@ -124,12 +137,51 @@ pub async fn start_server(config: Config) -> Result<()> {
 
     let services = Arc::new(RwLock::new(detected_services));
 
+    // Initialize project management
+    let project_repository = Arc::new(
+        ProjectRepository::new(&config.timescale_db_url)
+            .await
+            .context("Failed to initialize project repository")?
+    );
+
+    let schema_manager = Arc::new(
+        SchemaManager::new(&config.timescale_db_url)
+            .await
+            .context("Failed to initialize schema manager")?
+    );
+
+    let project_scanner = Arc::new(
+        ProjectScanner::new(
+            config.project_root.clone(),
+            project_repository.clone(),
+            schema_manager.clone(),
+        )
+    );
+
+    let project_manager = Arc::new(
+        ProjectManager::new(config.project_root.clone())
+    );
+
+    let dev_server_manager = Arc::new(
+        DevServerManager::new(config.project_root.clone())
+    );
+
+    let claude_service = Arc::new(
+        ClaudeService::new(config.project_root.clone())
+    );
+
     let app_state = AppState {
         process_manager,
         docker_manager,
         log_manager,
         metrics_collector,
         services,
+        project_repository,
+        schema_manager,
+        project_scanner,
+        project_manager,
+        dev_server_manager,
+        claude_service,
         project_root: config.project_root,
     };
 
@@ -155,6 +207,21 @@ pub async fn start_server(config: Config) -> Result<()> {
         .route("/api/system/metrics", get(get_system_metrics))
         .route("/api/logs/cleanup", post(cleanup_logs))
         .route("/api/logs/stats", get(get_log_stats))
+        .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/:id", get(get_project))
+        // TODO: Fix update_project handler - axum routing issue with Path + Json extractors
+        // Temporarily disabled - need to investigate axum handler trait requirements
+        // .route("/api/projects/:id/update", post(update_project_handler))
+        .route("/api/projects/:id", delete(delete_project))
+        .route("/api/projects/:id/metadata", get(get_project_metadata))
+        .route("/api/projects/scan", post(scan_all_projects))
+        .route("/api/projects/:name/scan", post(scan_project))
+        .route("/api/projects/:id/files", get(list_project_files))
+        .route("/api/projects/:id/files/*path", get(get_project_file).put(save_project_file))
+        .route("/api/projects/:id/dev-server/start", post(start_dev_server))
+        .route("/api/projects/:id/dev-server/stop", post(stop_dev_server))
+        .route("/api/projects/:id/dev-server/status", get(get_dev_server_status))
+        .route("/ws/projects/:id/chat", get(handle_chat_websocket))
         .nest_service("/assets", ServeDir::new(format!("{}/assets", static_path)))
         .fallback(serve_spa_handler)
         .layer(CorsLayer::permissive())
@@ -724,4 +791,474 @@ async fn get_log_stats(
 
     Ok(Json(stats))
 }
+
+// Project Management Handlers
+
+async fn list_projects(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Project>>, StatusCode> {
+    let projects = state.project_repository.list().await
+        .map_err(|e| {
+            error!("Failed to list projects: {}", e);
+            // Log the full error chain for debugging
+            let mut error_chain = format!("{}", e);
+            let mut source = e.source();
+            while let Some(err) = source {
+                error_chain.push_str(&format!(": {}", err));
+                source = err.source();
+            }
+            error!("Error chain: {}", error_chain);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(Json(projects))
+}
+
+async fn get_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Project>, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let project = state.project_repository.get_by_id(project_id).await
+        .map_err(|e| {
+            error!("Failed to get project: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(project))
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    Json(request): Json<CreateProjectRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    use crate::models::ProjectStatus;
+    use crate::schema_manager::SchemaManager;
+
+    let schema_name = request.schema_name
+        .unwrap_or_else(|| SchemaManager::generate_schema_name(&request.name));
+
+    // Tạo project folder trong ./sites
+    let project_path = state.project_manager.create_project_folder(&request.name)
+        .map_err(|e| {
+            error!("Failed to create project folder: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Tạo schema trong database
+    if let Err(e) = state.schema_manager.create_schema(&schema_name).await {
+        error!("Failed to create schema: {}", e);
+        // Cleanup: xóa folder nếu tạo schema thất bại
+        let _ = std::fs::remove_dir_all(&project_path);
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // Tạo project record trong database
+    let directory_path = project_path.to_string_lossy().to_string();
+    let project = Project {
+        project_id: Uuid::new_v4(),
+        name: request.name,
+        directory_path,
+        schema_name,
+        database_type: request.database_type,
+        database_url: request.database_url,
+        framework: request.framework,
+        metadata: crate::models::ProjectMetadata::default(),
+        last_scan_at: None,
+        status: ProjectStatus::Active,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    let project_id = match state.project_repository.create(&project).await {
+        Ok(id) => id,
+        Err(e) => {
+            error!("Failed to create project: {}", e);
+            // Cleanup: xóa folder và schema nếu tạo DB record thất bại
+            let _ = std::fs::remove_dir_all(&project_path);
+            let schema_name_clone = project.schema_name.clone();
+            let schema_manager_clone = state.schema_manager.clone();
+            tokio::spawn(async move {
+                let _ = schema_manager_clone.drop_schema(&schema_name_clone, true).await;
+            });
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "project_id": project_id,
+        "message": "Project created successfully"
+    }))))
+}
+
+// TODO: Fix update_project handler - axum routing issue with Path + Json extractors
+// Temporarily disabled - need to investigate axum handler trait requirements
+/*
+async fn update_project_handler(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    Json(request): Json<UpdateProjectRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    state.project_repository.update(project_id, &request).await
+        .map_err(|e| {
+            error!("Failed to update project: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(StatusCode::OK)
+}
+*/
+
+async fn delete_project(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    state.project_repository.delete(project_id).await
+        .map_err(|e| {
+            error!("Failed to delete project: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_project_metadata(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::ProjectMetadata>, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let project = state.project_repository.get_by_id(project_id).await
+        .map_err(|e| {
+            error!("Failed to get project: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(project.metadata))
+}
+
+async fn scan_all_projects(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let project_ids = state.project_scanner.scan_all_projects_in_sites().await
+        .map_err(|e| {
+            error!("Failed to scan projects: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "message": "Scan completed",
+        "projects_scanned": project_ids.len(),
+        "project_ids": project_ids
+    })))
+}
+
+async fn scan_project(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let sites_dir = state.project_root.join("sites").join(&name);
+    
+    if !sites_dir.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let project_id = state.project_scanner.scan_project(&sites_dir, &name).await
+        .map_err(|e| {
+            error!("Failed to scan project: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(serde_json::json!({
+        "message": "Project scanned successfully",
+        "project_id": project_id
+    })))
+}
+
+// Project Editor APIs
+async fn list_project_files(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<String>>, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let project = state.project_repository.get_by_id(project_id).await
+        .map_err(|e| {
+            error!("Failed to get project: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let files = state.project_manager.list_project_files(&project.name)
+        .map_err(|e| {
+            error!("Failed to list project files: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(files))
+}
+
+async fn get_project_file(
+    State(state): State<AppState>,
+    Path((id, path)): Path<(String, String)>,
+) -> Result<String, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let project = state.project_repository.get_by_id(project_id).await
+        .map_err(|e| {
+            error!("Failed to get project: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let content = state.project_manager.read_file(&project.name, &path)
+        .map_err(|e| {
+            error!("Failed to read file: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(content)
+}
+
+async fn save_project_file(
+    State(state): State<AppState>,
+    Path((id, path)): Path<(String, String)>,
+    body: String,
+) -> Result<StatusCode, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let project = state.project_repository.get_by_id(project_id).await
+        .map_err(|e| {
+            error!("Failed to get project: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    state.project_manager.write_file(&project.name, &path, &body)
+        .map_err(|e| {
+            error!("Failed to write file: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn start_dev_server(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let project = state.project_repository.get_by_id(project_id).await
+        .map_err(|e| {
+            error!("Failed to get project: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let project_path = PathBuf::from(&project.directory_path);
+    state.dev_server_manager.start_server(project_id, project_path).await
+        .map_err(|e| {
+            error!("Failed to start dev server: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn stop_dev_server(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    state.dev_server_manager.stop_server(project_id).await
+        .map_err(|e| {
+            error!("Failed to stop dev server: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(StatusCode::OK)
+}
+
+async fn get_dev_server_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let project_id = Uuid::parse_str(&id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if let Some(server_info) = state.dev_server_manager.get_status(project_id).await {
+        Ok(Json(serde_json::json!({
+            "running": true,
+            "url": server_info.url,
+            "port": server_info.port
+        })))
+    } else {
+        Ok(Json(serde_json::json!({
+            "running": false
+        })))
+    }
+}
+
+// WebSocket handler for chat
+async fn handle_chat_websocket(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let project_id = match Uuid::parse_str(&id) {
+        Ok(id) => id,
+        Err(_) => {
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    };
+
+    // Get project
+    let project = match state.project_repository.get_by_id(project_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Err(_) => {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let project_path = PathBuf::from(&project.directory_path);
+    let claude_service = state.claude_service.clone();
+
+    // Handle WebSocket connection
+    ws.on_upgrade(move |socket| handle_socket(socket, claude_service, project_path))
+}
+
+async fn handle_socket(
+    socket: WebSocket,
+    claude_service: Arc<ClaudeService>,
+    project_path: PathBuf,
+) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut message_id = 0u64;
+
+    while let Some(msg) = receiver.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                // Parse message
+                let data: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+
+                if data["type"] == "message" {
+                    let user_message = data["content"].as_str().unwrap_or("");
+                    
+                    // Send user message back
+                    message_id += 1;
+                    let user_msg = serde_json::json!({
+                        "type": "message",
+                        "id": message_id.to_string(),
+                        "role": "user",
+                        "content": user_message,
+                        "timestamp": chrono::Utc::now()
+                    });
+                    let _ = sender.send(Message::Text(user_msg.to_string())).await;
+
+                    // Execute Claude command
+                    message_id += 1;
+                    let assistant_id = message_id.to_string();
+                    
+                    match claude_service.execute_command(project_path.clone(), user_message.to_string()).await {
+                        Ok(mut rx) => {
+                            // Accumulate content for streaming
+                            let mut accumulated_content = String::new();
+                            let mut chunk_count = 0;
+                            
+                            debug!("Starting to receive chunks from Claude service");
+                            
+                            // Stream responses
+                            while let Some(chunk) = rx.recv().await {
+                                chunk_count += 1;
+                                debug!("Received chunk #{}: {} (length: {})", chunk_count, chunk.chars().take(50).collect::<String>(), chunk.len());
+                                
+                                // Filter out "[DONE]" and other control signals
+                                if chunk.trim() == "[DONE]" || chunk.trim().starts_with("[") {
+                                    debug!("Filtered out control signal: {}", chunk);
+                                    continue;
+                                }
+                                
+                                // Accumulate content
+                                accumulated_content.push_str(&chunk);
+                                debug!("Accumulated content length: {}", accumulated_content.len());
+                                
+                                // Send accumulated content so far (for streaming effect)
+                                let msg = serde_json::json!({
+                                    "type": "message",
+                                    "id": assistant_id,
+                                    "role": "assistant",
+                                    "content": accumulated_content.clone(),
+                                    "timestamp": chrono::Utc::now()
+                                });
+                                
+                                debug!("Sending message to client (content length: {})", accumulated_content.len());
+                                let _ = sender.send(Message::Text(msg.to_string())).await;
+                            }
+
+                            debug!("Finished receiving chunks. Total chunks: {}, Final content length: {}", chunk_count, accumulated_content.len());
+                            
+                            // If we have content but no chunks were sent, send it now
+                            if !accumulated_content.is_empty() && chunk_count == 0 {
+                                debug!("Sending accumulated content as single message");
+                                let msg = serde_json::json!({
+                                    "type": "message",
+                                    "id": assistant_id,
+                                    "role": "assistant",
+                                    "content": accumulated_content,
+                                    "timestamp": chrono::Utc::now()
+                                });
+                                let _ = sender.send(Message::Text(msg.to_string())).await;
+                            }
+
+                            // Send done signal
+                            let done_msg = serde_json::json!({
+                                "type": "done"
+                            });
+                            debug!("Sending done signal");
+                            let _ = sender.send(Message::Text(done_msg.to_string())).await;
+                        }
+                        Err(e) => {
+                            let error_msg = serde_json::json!({
+                                "type": "error",
+                                "message": e.to_string()
+                            });
+                            let _ = sender.send(Message::Text(error_msg.to_string())).await;
+                        }
+                    }
+                }
+            }
+            Ok(Message::Close(_)) => {
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+// Fix missing import
+use futures::{SinkExt, StreamExt};
 

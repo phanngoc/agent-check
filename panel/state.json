@@ -1,37 +1,4 @@
 {
-  "services": [
-    {
-      "service_id": "dashboard",
-      "pid": 99302,
-      "started_at": "2025-11-23T07:58:13.475900Z",
-      "command": "npm run dev",
-      "working_dir": "/Users/ngocp/Documents/projects/agent-check/dashboard",
-      "environment": {}
-    },
-    {
-      "service_id": "backend",
-      "pid": 99450,
-      "started_at": "2025-11-23T07:58:15.304041Z",
-      "command": "air",
-      "working_dir": "/Users/ngocp/Documents/projects/agent-check/backend",
-      "environment": {}
-    },
-    {
-      "service_id": "demo",
-      "pid": 99668,
-      "started_at": "2025-11-23T07:58:17.940702Z",
-      "command": "php artisan serve",
-      "working_dir": "/Users/ngocp/Documents/projects/agent-check/demo/blog",
-      "environment": {}
-    },
-    {
-      "service_id": "tracker",
-      "pid": 99754,
-      "started_at": "2025-11-23T07:58:19.445253Z",
-      "command": "npm run dev",
-      "working_dir": "/Users/ngocp/Documents/projects/agent-check/tracker",
-      "environment": {}
-    }
-  ],
-  "updated_at": "2025-11-23T07:58:19.445454Z"
+  "services": [],
+  "updated_at": "2025-11-24T01:56:14.393144Z"
 }

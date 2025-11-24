@@ -18,11 +18,19 @@ export default defineConfig({
       },
     },
   },
+  optimizeDeps: {
+    include: ['monaco-editor'],
+  },
   server: {
     port: 5173,
     proxy: {
       '/api': {
         target: 'http://localhost:9000',
+        changeOrigin: true,
+      },
+      '/ws': {
+        target: 'ws://localhost:9000',
+        ws: true,
         changeOrigin: true,
       },
     },

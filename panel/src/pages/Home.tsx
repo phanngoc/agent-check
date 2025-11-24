@@ -46,6 +46,12 @@ export const Home: Component = () => {
         <h1 class="text-3xl font-bold">🚀 Process Manager Panel</h1>
         <div class="flex items-center gap-4">
           <Button
+            variant="outline"
+            onClick={() => navigate("/projects")}
+          >
+            📁 Projects
+          </Button>
+          <Button
             variant="secondary"
             onClick={() => {
               window.location.reload();

@@ -283,3 +283,156 @@ export async function getLogStats(): Promise<any> {
   return fetchJson(`${API_BASE}/logs/stats`);
 }
 
+// Projects
+export interface Project {
+  project_id: string;
+  name: string;
+  directory_path: string;
+  schema_name: string;
+  database_type?: string;
+  database_url?: string;
+  framework?: string;
+  metadata: ProjectMetadata;
+  last_scan_at?: string;
+  status: "active" | "inactive" | "error";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectMetadata {
+  tables: TableInfo[];
+  models: ModelInfo[];
+  routes: RouteInfo[];
+  apis: ApiInfo[];
+  dependencies: Record<string, string>;
+}
+
+export interface TableInfo {
+  name: string;
+  columns: ColumnInfo[];
+}
+
+export interface ColumnInfo {
+  name: string;
+  data_type: string;
+  is_nullable: boolean;
+  is_primary_key: boolean;
+}
+
+export interface ModelInfo {
+  name: string;
+  file_path: string;
+  fields: string[];
+}
+
+export interface RouteInfo {
+  method: string;
+  path: string;
+  handler?: string;
+}
+
+export interface ApiInfo {
+  method: string;
+  path: string;
+  controller?: string;
+  description?: string;
+}
+
+export interface CreateProjectRequest {
+  name: string;
+  directory_path: string;
+  schema_name?: string;
+  database_type?: string;
+  database_url?: string;
+  framework?: string;
+}
+
+export async function listProjects(): Promise<Project[]> {
+  return fetchJson<Project[]>(`${API_BASE}/projects`);
+}
+
+export async function getProject(id: string): Promise<Project> {
+  return fetchJson<Project>(`${API_BASE}/projects/${id}`);
+}
+
+export async function createProject(request: CreateProjectRequest): Promise<{ project_id: string }> {
+  return fetchJson<{ project_id: string }>(`${API_BASE}/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function updateProject(id: string, request: Partial<CreateProjectRequest>): Promise<void> {
+  await fetch(`${API_BASE}/projects/${id}/update`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function deleteProject(id: string): Promise<void> {
+  await fetch(`${API_BASE}/projects/${id}`, { method: "DELETE" });
+}
+
+export async function getProjectMetadata(id: string): Promise<ProjectMetadata> {
+  return fetchJson<ProjectMetadata>(`${API_BASE}/projects/${id}/metadata`);
+}
+
+export async function scanAllProjects(): Promise<{ message: string; projects_scanned: number; project_ids: string[] }> {
+  return fetchJson(`${API_BASE}/projects/scan`, { method: "POST" });
+}
+
+export async function scanProject(name: string): Promise<{ message: string; project_id: string }> {
+  return fetchJson(`${API_BASE}/projects/${name}/scan`, { method: "POST" });
+}
+
+// Project Editor APIs
+export async function getProjectFiles(id: string): Promise<string[]> {
+  return fetchJson<string[]>(`${API_BASE}/projects/${id}/files`);
+}
+
+export async function getProjectFile(id: string, filePath: string): Promise<string> {
+  const encodedPath = encodeURIComponent(filePath);
+  const response = await fetch(`${API_BASE}/projects/${id}/files/${encodedPath}`);
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
+  }
+  return response.text();
+}
+
+export async function saveProjectFile(id: string, filePath: string, content: string): Promise<void> {
+  const encodedPath = encodeURIComponent(filePath);
+  await fetch(`${API_BASE}/projects/${id}/files/${encodedPath}`, {
+    method: "PUT",
+    headers: { "Content-Type": "text/plain" },
+    body: content,
+  });
+}
+
+export interface DevServerStatus {
+  running: boolean;
+  url?: string;
+  port?: number;
+}
+
+export async function startDevServer(id: string): Promise<void> {
+  await fetch(`${API_BASE}/projects/${id}/dev-server/start`, { method: "POST" });
+}
+
+export async function stopDevServer(id: string): Promise<void> {
+  await fetch(`${API_BASE}/projects/${id}/dev-server/stop`, { method: "POST" });
+}
+
+export async function getDevServerStatus(id: string): Promise<DevServerStatus> {
+  return fetchJson<DevServerStatus>(`${API_BASE}/projects/${id}/dev-server/status`);
+}
+
+export async function getPreviewUrl(id: string): Promise<string> {
+  const status = await getDevServerStatus(id);
+  if (!status.url) {
+    throw new Error("Dev server is not running");
+  }
+  return status.url;
+}
+

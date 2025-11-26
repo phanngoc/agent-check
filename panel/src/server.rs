@@ -1024,9 +1024,26 @@ async fn get_project_file(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let content = state.project_manager.read_file(&project.name, &path)
+    // Axum Path extractor with *path should already decode the path
+    // But if it's still encoded, try to decode it
+    let decoded_path = if path.contains('%') {
+        urlencoding::decode(&path)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| {
+                warn!("Failed to decode path, using as-is: {}", path);
+                path.clone()
+            })
+    } else {
+        path.clone()
+    };
+    
+    debug!("Getting project file: project={}, raw_path={}, decoded_path={}", 
+           project.name, path, decoded_path);
+
+    let content = state.project_manager.read_file(&project.name, &decoded_path)
         .map_err(|e| {
-            error!("Failed to read file: {}", e);
+            error!("Failed to read file: project={}, raw_path={}, decoded_path={}, error={}", 
+                   project.name, path, decoded_path, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -1048,9 +1065,26 @@ async fn save_project_file(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    state.project_manager.write_file(&project.name, &path, &body)
+    // Axum Path extractor with *path should already decode the path
+    // But if it's still encoded, try to decode it
+    let decoded_path = if path.contains('%') {
+        urlencoding::decode(&path)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| {
+                warn!("Failed to decode path, using as-is: {}", path);
+                path.clone()
+            })
+    } else {
+        path.clone()
+    };
+    
+    debug!("Saving project file: project={}, raw_path={}, decoded_path={}", 
+           project.name, path, decoded_path);
+
+    state.project_manager.write_file(&project.name, &decoded_path, &body)
         .map_err(|e| {
-            error!("Failed to write file: {}", e);
+            error!("Failed to write file: project={}, raw_path={}, decoded_path={}, error={}", 
+                   project.name, path, decoded_path, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 

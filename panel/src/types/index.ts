@@ -70,3 +70,11 @@ export interface ServiceMetrics {
   pid?: number | null;
 }
 
+export interface FileTreeNode {
+  name: string;
+  path: string;
+  type: 'file' | 'folder';
+  children?: FileTreeNode[];
+  expanded?: boolean;
+}
+

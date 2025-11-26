@@ -29,4 +29,5 @@ tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1"
 reqwest = { version = "0.11", features = ["json"] }
 mysql_async = "0.36"
 tokio-tungstenite = "0.21"
+urlencoding = "2.1"
 

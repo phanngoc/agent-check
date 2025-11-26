@@ -3,6 +3,7 @@ import { useParams } from "@solidjs/router";
 import { CodeEditor } from "@/components/CodeEditor";
 import { ChatPanel } from "@/components/ChatPanel";
 import { PreviewPanel } from "@/components/PreviewPanel";
+import { FileTree } from "@/components/FileTree";
 import { Button } from "@/components/ui/button";
 import * as api from "@/api/client";
 
@@ -91,83 +92,82 @@ export const ProjectEditor: Component = () => {
 
         {/* Main Content - Layout with Collapsible Code Editor */}
         <div class="flex-1 flex overflow-hidden">
-          {/* Left Panel - Code Editor (Collapsible) */}
-          <Show when={codeEditorExpanded()}>
-            <div class="w-1/3 border-r flex flex-col">
-              <div class="border-b px-4 py-2 bg-muted/50">
-                <div class="flex items-center justify-between">
-                  <div class="text-sm font-medium">
-                    {selectedFile() || "No file selected"}
-                  </div>
-                  <div class="flex gap-2">
-                    <select
-                      class="text-xs border rounded px-2 py-1"
-                      value={selectedFile() || ""}
-                      onChange={(e) => handleFileSelect(e.currentTarget.value)}
-                    >
-                      <option value="">Select a file...</option>
-                      {files().map((file) => (
-                        <option value={file}>{file}</option>
-                      ))}
-                    </select>
+          <Show
+            when={codeEditorExpanded()}
+            fallback={
+              /* Chat and Preview Panels when code editor is closed */
+              <div class="w-full flex">
+                {/* Chat Panel - Left Column (50%) */}
+                <div class="w-1/2 border-r flex flex-col">
+                  <div class="border-b px-4 py-2 bg-muted/50 flex items-center justify-between">
+                    <div class="text-sm font-medium">Chat with Claude</div>
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => setCodeEditorExpanded(false)}
+                      onClick={() => setCodeEditorExpanded(true)}
                       class="text-xs"
                     >
-                      ← Hide
+                      Show Code Editor →
                     </Button>
+                  </div>
+                  <div class="flex-1 overflow-hidden">
+                    <ChatPanel projectId={params.id} />
+                  </div>
+                </div>
+
+                {/* Preview Panel - Right Column (50%) */}
+                <div class="w-1/2 flex flex-col">
+                  <div class="border-b px-4 py-2 bg-muted/50 flex items-center justify-between">
+                    <div class="text-sm font-medium">Live Preview</div>
+                    <PreviewPanel projectId={params.id} />
+                  </div>
+                  <div class="flex-1 overflow-hidden">
+                    <iframe
+                      id="preview-iframe"
+                      class="w-full h-full border-0"
+                      src="about:blank"
+                    />
                   </div>
                 </div>
               </div>
-              <div class="flex-1 overflow-hidden">
-                <CodeEditor
-                  value={fileContent()}
-                  onChange={setFileContent}
-                  language={getLanguageFromFile(selectedFile())}
+            }
+          >
+            {/* FileTree Sidebar and Code Editor when code editor is open */}
+            <div class="w-full flex">
+              {/* FileTree Sidebar - Left (25%) */}
+              <div class="w-1/4">
+                <FileTree
+                  files={files()}
+                  selectedFile={selectedFile()}
+                  onFileSelect={handleFileSelect}
                 />
               </div>
-            </div>
-          </Show>
 
-          {/* Right Panels - Chat and Preview Side by Side */}
-          <div class={codeEditorExpanded() ? "w-2/3 flex" : "w-full flex"}>
-            {/* Chat Panel - Left Column (50%) */}
-            <div class="w-1/2 border-r flex flex-col">
-              <div class="border-b px-4 py-2 bg-muted/50 flex items-center justify-between">
-                <div class="text-sm font-medium">Chat with Claude</div>
-                <Show when={!codeEditorExpanded()}>
+              {/* Code Editor - Right (75%) */}
+              <div class="w-3/4 flex flex-col border-l">
+                <div class="border-b px-4 py-2 bg-muted/50 flex items-center justify-between">
+                  <div class="text-sm font-medium">
+                    {selectedFile() || "No file selected"}
+                  </div>
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setCodeEditorExpanded(true)}
+                    onClick={() => setCodeEditorExpanded(false)}
                     class="text-xs"
                   >
-                    Show Code Editor →
+                    ← Hide
                   </Button>
-                </Show>
-              </div>
-              <div class="flex-1 overflow-hidden">
-                <ChatPanel projectId={params.id} />
-              </div>
-            </div>
-
-            {/* Preview Panel - Right Column (50%) */}
-            <div class="w-1/2 flex flex-col">
-              <div class="border-b px-4 py-2 bg-muted/50 flex items-center justify-between">
-                <div class="text-sm font-medium">Live Preview</div>
-                <PreviewPanel projectId={params.id} />
-              </div>
-              <div class="flex-1 overflow-hidden">
-                <iframe
-                  id="preview-iframe"
-                  class="w-full h-full border-0"
-                  src="about:blank"
-                />
+                </div>
+                <div class="flex-1 overflow-hidden">
+                  <CodeEditor
+                    value={fileContent()}
+                    onChange={setFileContent}
+                    language={getLanguageFromFile(selectedFile())}
+                  />
+                </div>
               </div>
             </div>
-          </div>
+          </Show>
         </div>
       </div>
     </Show>
